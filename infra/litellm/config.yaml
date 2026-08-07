@@ -1,0 +1,41 @@
+model_list:
+  - model_name: sql-planner-primary
+    litellm_params:
+      model: os.environ/SQL_PLANNER_PRIMARY_MODEL
+      api_key: os.environ/OPENAI_API_KEY
+      timeout: 12
+
+  - model_name: sql-planner-fallback
+    litellm_params:
+      model: os.environ/SQL_PLANNER_FALLBACK_MODEL
+      api_key: os.environ/ANTHROPIC_API_KEY
+      timeout: 12
+
+  - model_name: answer-primary
+    litellm_params:
+      model: os.environ/ANSWER_PRIMARY_MODEL
+      api_key: os.environ/OPENAI_API_KEY
+      timeout: 12
+
+  - model_name: answer-fallback
+    litellm_params:
+      model: os.environ/ANSWER_FALLBACK_MODEL
+      api_key: os.environ/ANTHROPIC_API_KEY
+      timeout: 12
+
+router_settings:
+  num_retries: 1
+  timeout: 12
+  allowed_fails: 2
+  cooldown_time: 60
+  fallbacks:
+    - sql-planner-primary:
+        - sql-planner-fallback
+    - answer-primary:
+        - answer-fallback
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  drop_params: true
