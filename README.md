@@ -56,6 +56,20 @@ uv run uvicorn app.main:app --reload
 uv run pytest
 ```
 
+### Database connector contracts
+
+The connector integration tests use isolated analytics databases and restricted
+`analytics` credentials. They are opt-in and do not start with the normal stack.
+
+```bash
+docker compose --profile integration up -d postgres-analytics mysql-analytics
+cd backend
+P2I_RUN_INTEGRATION=1 \
+P2I_POSTGRES_ANALYTICS_URL=postgresql+asyncpg://analytics:analytics@127.0.0.1:5433/analytics \
+P2I_MYSQL_ANALYTICS_URL=mysql+asyncmy://analytics:analytics@127.0.0.1:3307/analytics \
+uv run pytest tests/integration/test_database_connectors.py
+```
+
 ## Frontend development
 
 ```bash

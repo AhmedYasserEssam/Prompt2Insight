@@ -1,4 +1,36 @@
 services:
+  postgres-analytics:
+    image: postgres:17-alpine
+    profiles: ["integration"]
+    environment:
+      POSTGRES_DB: analytics
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./infra/database-contract/postgres-init.sql:/docker-entrypoint-initdb.d/01-contract.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mysql-analytics:
+    image: mysql:8.4
+    profiles: ["integration"]
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./infra/database-contract/mysql-init.sql:/docker-entrypoint-initdb.d/01-contract.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   app-db:
     image: postgres:17-alpine
     environment:

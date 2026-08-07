@@ -1,10 +1,13 @@
+import asyncio
 import json
 import time
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import (
     DatabaseCapabilities,
     ExplainResult,
@@ -30,13 +33,16 @@ class PostgreSQLConnector(SQLAlchemyConnectorBase):
         return DatabaseCapabilities(dialect=self.dialect, server_version=server_version)
 
     async def explain(self, query: PreparedQuery) -> ExplainResult:
-        async with self._engine.connect() as connection:
-            raw = (
-                await connection.execute(
-                    text(f"EXPLAIN (FORMAT JSON) {query.sql}"),
-                    query.parameters,
-                )
-            ).scalar_one()
+        try:
+            async with self._engine.connect() as connection:
+                raw = (
+                    await connection.execute(
+                        text(f"EXPLAIN (FORMAT JSON) {query.sql}"),
+                        query.parameters,
+                    )
+                ).scalar_one()
+        except SQLAlchemyError as error:
+            raise self._normalize_error(error) from error
 
         plan = raw if isinstance(raw, list) else json.loads(raw)
         root: dict[str, Any] = plan[0]["Plan"]
@@ -48,19 +54,25 @@ class PostgreSQLConnector(SQLAlchemyConnectorBase):
 
     async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
         started = time.perf_counter()
-        async with self._engine.connect() as connection:
-            transaction = await connection.begin()
-            try:
-                await connection.execute(text("SET TRANSACTION READ ONLY"))
-                await connection.execute(
-                    text("SELECT set_config('statement_timeout', :value, true)"),
-                    {"value": f"{query.timeout_ms}ms"},
-                )
-                result = await connection.execute(text(query.sql), query.parameters)
-                columns = list(result.keys())
-                fetched = result.fetchmany(query.maximum_rows + 1)
-            finally:
-                await transaction.rollback()
+        try:
+            async with asyncio.timeout(query.timeout_ms / 1000):
+                async with self._engine.connect() as connection:
+                    transaction = await connection.begin()
+                    try:
+                        await connection.execute(text("SET TRANSACTION READ ONLY"))
+                        await connection.execute(
+                            text("SELECT set_config('statement_timeout', :value, true)"),
+                            {"value": f"{query.timeout_ms}ms"},
+                        )
+                        result = await connection.execute(text(query.sql), query.parameters)
+                        columns = list(result.keys())
+                        fetched = result.fetchmany(query.maximum_rows + 1)
+                    finally:
+                        await transaction.rollback()
+        except TimeoutError as error:
+            raise Prompt2InsightError(ErrorCode.QUERY_TIMEOUT, "The query timed out.") from error
+        except SQLAlchemyError as error:
+            raise self._normalize_error(error) from error
 
         truncated = len(fetched) > query.maximum_rows
         rows = fetched[: query.maximum_rows]

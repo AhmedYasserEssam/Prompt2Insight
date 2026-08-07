@@ -4,8 +4,10 @@ from typing import Any
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.connector import SQLDatabaseConnector
 from app.domain.databases.models import (
     ColumnMetadata,
@@ -30,14 +32,20 @@ class SQLAlchemyConnectorBase(SQLDatabaseConnector):
         self._approved_schemas = tuple(approved_schemas or ())
 
     async def test_connection(self) -> None:
-        async with self._engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
+        try:
+            async with self._engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        except SQLAlchemyError as error:
+            raise self._normalize_error(error) from error
 
     async def get_schema_snapshot(self) -> SchemaSnapshot:
-        async with self._engine.connect() as connection:
-            version = await self._get_server_version(connection)
-            database = await self._get_database_name(connection)
-            tables = await connection.run_sync(self._inspect_tables)
+        try:
+            async with self._engine.connect() as connection:
+                version = await self._get_server_version(connection)
+                database = await self._get_database_name(connection)
+                tables = await connection.run_sync(self._inspect_tables)
+        except SQLAlchemyError as error:
+            raise self._normalize_error(error) from error
 
         return SchemaSnapshot(
             dialect=self.dialect,
@@ -95,3 +103,37 @@ class SQLAlchemyConnectorBase(SQLDatabaseConnector):
 
     async def close(self) -> None:
         await self._engine.dispose()
+
+    @staticmethod
+    def _normalize_error(error: SQLAlchemyError) -> Prompt2InsightError:
+        message = str(error).lower()
+        if any(
+            marker in message
+            for marker in (
+                "statement timeout",
+                "maximum statement execution time exceeded",
+                "max_execution_time",
+                "query execution was interrupted",
+            )
+        ):
+            return Prompt2InsightError(ErrorCode.QUERY_TIMEOUT, "The query timed out.")
+        if any(
+            marker in message
+            for marker in (
+                "permission denied",
+                "access denied",
+                "command denied",
+                "read-only",
+                "read only",
+                "not allowed",
+            )
+        ):
+            return Prompt2InsightError(
+                ErrorCode.SQL_POLICY_REJECTED,
+                "The analytics role cannot modify the database.",
+            )
+        return Prompt2InsightError(
+            ErrorCode.DATABASE_UNAVAILABLE,
+            "The database operation failed.",
+            retryable=True,
+        )

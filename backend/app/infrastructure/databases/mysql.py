@@ -1,10 +1,13 @@
+import asyncio
 import json
 import time
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import (
     DatabaseCapabilities,
     ExplainResult,
@@ -30,37 +33,50 @@ class MySQLConnector(SQLAlchemyConnectorBase):
         return DatabaseCapabilities(dialect=self.dialect, server_version=server_version)
 
     async def explain(self, query: PreparedQuery) -> ExplainResult:
-        async with self._engine.connect() as connection:
-            raw = (
-                await connection.execute(
-                    text(f"EXPLAIN FORMAT=JSON {query.sql}"),
-                    query.parameters,
-                )
-            ).scalar_one()
+        try:
+            async with self._engine.connect() as connection:
+                raw = (
+                    await connection.execute(
+                        text(f"EXPLAIN FORMAT=JSON {query.sql}"),
+                        query.parameters,
+                    )
+                ).scalar_one()
+        except SQLAlchemyError as error:
+            raise self._normalize_error(error) from error
 
         plan: dict[str, Any] = raw if isinstance(raw, dict) else json.loads(raw)
-        return ExplainResult(raw_plan=plan)
+        root = plan["query_block"]
+        return ExplainResult(
+            raw_plan=plan,
+            estimated_cost=float(root.get("cost_info", {}).get("query_cost", 0)),
+            estimated_rows=self._estimated_rows(root),
+        )
 
     async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
         started = time.perf_counter()
-        async with self._engine.connect() as connection:
-            await connection.exec_driver_sql("SET SESSION TRANSACTION READ ONLY")
-            await connection.commit()
-            await connection.exec_driver_sql(
-                f"SET SESSION MAX_EXECUTION_TIME={int(query.timeout_ms)}"
-            )
-            await connection.commit()
-
-            transaction = await connection.begin()
-            try:
-                result = await connection.execute(text(query.sql), query.parameters)
-                columns = list(result.keys())
-                fetched = result.fetchmany(query.maximum_rows + 1)
-            finally:
-                await transaction.rollback()
-                await connection.exec_driver_sql("SET SESSION TRANSACTION READ WRITE")
-                await connection.exec_driver_sql("SET SESSION MAX_EXECUTION_TIME=0")
-                await connection.commit()
+        try:
+            async with asyncio.timeout(query.timeout_ms / 1000):
+                async with self._engine.connect() as connection:
+                    await connection.exec_driver_sql("SET SESSION TRANSACTION READ ONLY")
+                    await connection.commit()
+                    await connection.exec_driver_sql(
+                        f"SET SESSION MAX_EXECUTION_TIME={int(query.timeout_ms)}"
+                    )
+                    await connection.commit()
+                    transaction = await connection.begin()
+                    try:
+                        result = await connection.execute(text(query.sql), query.parameters)
+                        columns = list(result.keys())
+                        fetched = result.fetchmany(query.maximum_rows + 1)
+                    finally:
+                        await transaction.rollback()
+                        await connection.exec_driver_sql("SET SESSION TRANSACTION READ WRITE")
+                        await connection.exec_driver_sql("SET SESSION MAX_EXECUTION_TIME=0")
+                        await connection.commit()
+        except TimeoutError as error:
+            raise Prompt2InsightError(ErrorCode.QUERY_TIMEOUT, "The query timed out.") from error
+        except SQLAlchemyError as error:
+            raise self._normalize_error(error) from error
 
         truncated = len(fetched) > query.maximum_rows
         rows = fetched[: query.maximum_rows]
@@ -71,3 +87,20 @@ class MySQLConnector(SQLAlchemyConnectorBase):
             truncated=truncated,
             duration_ms=int((time.perf_counter() - started) * 1000),
         )
+
+    @staticmethod
+    def _estimated_rows(node: dict[str, Any]) -> int | None:
+        if "rows_produced_per_join" in node:
+            return int(node["rows_produced_per_join"])
+        for value in node.values():
+            if isinstance(value, dict):
+                rows = MySQLConnector._estimated_rows(value)
+                if rows is not None:
+                    return rows
+            if isinstance(value, list):
+                for child in value:
+                    if isinstance(child, dict):
+                        rows = MySQLConnector._estimated_rows(child)
+                        if rows is not None:
+                            return rows
+        return None
