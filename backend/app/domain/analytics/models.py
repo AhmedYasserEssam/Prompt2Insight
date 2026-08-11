@@ -31,6 +31,8 @@ class AnalyticsRequest(BaseModel):
 
 
 class QueryFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     dimension_id: str
     operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "in", "between"]
     value: Any
@@ -61,8 +63,29 @@ class ChartSpecification(BaseModel):
 
 
 class ResultTable(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     columns: list[str]
     rows: list[list[Any]]
+
+
+class AnswerOutput(BaseModel):
+    """Structured result produced by either answer-model provider."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str
+    insights: list[str] = Field(default_factory=list)
+    chart: ChartSpecification | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ModelExecutionMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    actual_model: str | None = None
+    fallback_used: bool = False
+    fallback_reason: str | None = None
 
 
 class AnalyticsResponse(BaseModel):
@@ -77,3 +100,4 @@ class AnalyticsResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     error_code: ErrorCode | None = None
     retryable: bool = False
+    model_metadata: ModelExecutionMetadata | None = None

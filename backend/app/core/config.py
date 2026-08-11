@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     )
     litellm_base_url: str = "http://localhost:4000/v1"
     litellm_master_key: str = "replace-this-in-production"
+    planner_primary_model: str = "sql-planner-primary"
+    planner_fallback_model: str = "sql-planner-fallback"
+    answer_primary_model: str = "answer-primary"
+    answer_fallback_model: str = "answer-fallback"
 
     query_timeout_ms: int = 8000
     lock_timeout_ms: int = 2000

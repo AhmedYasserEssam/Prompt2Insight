@@ -48,7 +48,11 @@ class AnalyticsRequestRepository:
                     request_id=request.request_id,
                     status=response.status.value,
                     latency_ms=0,
-                    model_metadata={"mode": "mock"},
+                    model_metadata=(
+                        response.model_metadata.model_dump(mode="json")
+                        if response.model_metadata is not None
+                        else {"mode": "mock"}
+                    ),
                 )
             )
             await session.commit()
