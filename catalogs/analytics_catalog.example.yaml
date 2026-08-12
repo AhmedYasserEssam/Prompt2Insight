@@ -7,7 +7,7 @@ metrics:
       ar: الإيرادات
     aliases:
       en: [revenue, total revenue, net sales]
-      ar: [الإيراد, الإيرادات, إجمالي الإيرادات, صافي المبيعات, المبيعات]
+      ar: [الإيراد, الإيرادات, ايرادات, إجمالي الإيرادات, صافي المبيعات, المبيعات]
     descriptions:
       en: Net recognized revenue excluding tax.
       ar: صافي الإيرادات المثبتة باستثناء الضرائب.
@@ -24,6 +24,9 @@ dimensions:
     aliases:
       en: [month, monthly, order month]
       ar: [الشهر, شهري, شهر الطلب, حسب الشهر]
+    descriptions:
+      en: Calendar month in which the order was created.
+      ar: الشهر التقويمي الذي تم فيه إنشاء الطلب.
     expressions:
       postgres: DATE_TRUNC('month', analytics.orders.created_at)
       mysql: DATE_FORMAT(analytics.orders.created_at, '%Y-%m-01')
@@ -35,9 +38,26 @@ dimensions:
     aliases:
       en: [category, product category]
       ar: [الفئة, فئة المنتج, تصنيف المنتج]
+    descriptions:
+      en: Product category associated with the order item.
+      ar: فئة المنتج المرتبطة ببند الطلب.
     expressions:
       postgres: analytics.products.category
       mysql: analytics.products.category
+
+  region:
+    labels:
+      en: Region
+      ar: المنطقة
+    aliases:
+      en: [region, sales region]
+      ar: [المنطقة, الإقليم, منطقة المبيعات]
+    descriptions:
+      en: Customer sales region.
+      ar: منطقة مبيعات العميل.
+    expressions:
+      postgres: analytics.orders.region
+      mysql: analytics.orders.region
 
 join_contracts:
   - left: analytics.order_items.order_id
@@ -50,6 +70,7 @@ column_policies:
   analytics.customers.phone: prohibited
   analytics.order_items.net_amount: non_sensitive
   analytics.orders.created_at: non_sensitive
+  analytics.orders.region: non_sensitive
 
 privacy:
   privacy_unit: analytics.orders.customer_id

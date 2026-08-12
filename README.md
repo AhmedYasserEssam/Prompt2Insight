@@ -11,7 +11,7 @@ Starter repository for a bilingual English/Arabic business-intelligence assistan
 - PostgreSQL and MySQL connector implementations
 - SQLGlot policy validation
 - Bilingual semantic-catalog example
-- LiteLLM primary/fallback model routing
+- LiteLLM/Groq Qwen primary planner routing with optional local vLLM support
 - Docker Compose development environment
 - Unit tests and an implementation checklist
 
@@ -44,7 +44,20 @@ Open:
 - Backend OpenAPI: http://localhost:8000/docs
 - LiteLLM: http://localhost:4000
 
-`MOCK_MODE=true` is the default. The API starts without external LLM keys and returns a controlled bilingual `not_configured` response until the real pipeline is wired.
+`MOCK_MODE=true` is the default. Normal development uses the LiteLLM proxy and Groq's hosted
+`groq/qwen/qwen3.6-27b` planner model; set `GROQ_API_KEY`, `LITELLM_BASE_URL`, and
+`LITELLM_MASTER_KEY` as shown in `.env.example`. No local vLLM service is needed. vLLM remains
+an opt-in provider (`VLLM_ENABLED=true`) and is never part of normal application readiness.
+`GET /api/v1/health/llm` checks LiteLLM's configured planner alias. `GET /api/v1/health/vllm`
+reports `disabled` unless optional vLLM has been enabled.
+
+Run the optional live provider boundary test only after vLLM is serving the configured Qwen
+model:
+
+```bash
+cd backend
+P2I_RUN_VLLM_INTEGRATION=1 uv run pytest tests/integration/test_vllm_planner.py
+```
 
 ## Backend development
 

@@ -18,6 +18,7 @@ def catalog():
 def test_english_and_arabic_metric_aliases_resolve_to_the_same_id(catalog) -> None:
     assert catalog.resolve_metric_id("total revenue") == "revenue"
     assert catalog.resolve_metric_id("إجمالي الإيرادات") == "revenue"
+    assert catalog.resolve_metric_id("ايرادات") == "revenue"
     assert catalog.resolve_dimension_id("monthly") == "order_month"
     assert catalog.resolve_dimension_id("حسب الشهر") == "order_month"
 

@@ -15,6 +15,7 @@ class ResponseLanguage(StrEnum):
 
 
 class AnalyticsStatus(StrEnum):
+    PLANNED = "planned"
     SUCCESS = "success"
     NEEDS_CLARIFICATION = "needs_clarification"
     UNSUPPORTED = "unsupported"
@@ -84,8 +85,14 @@ class ModelExecutionMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     actual_model: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    latency_ms: int | None = None
     fallback_used: bool = False
     fallback_reason: str | None = None
+    retry_count: int = 0
+    generation_stage: str | None = None
+    database_dialect: SQLDialect | None = None
 
 
 class AnalyticsResponse(BaseModel):
@@ -97,6 +104,7 @@ class AnalyticsResponse(BaseModel):
     table: ResultTable | None = None
     chart: ChartSpecification | None = None
     sql: str | None = None
+    query_plan: QueryPlan | None = None
     warnings: list[str] = Field(default_factory=list)
     error_code: ErrorCode | None = None
     retryable: bool = False

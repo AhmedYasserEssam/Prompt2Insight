@@ -2,14 +2,14 @@ model_list:
   - model_name: sql-planner-primary
     litellm_params:
       model: os.environ/SQL_PLANNER_PRIMARY_MODEL
-      api_key: os.environ/OPENAI_API_KEY
-      timeout: 12
+      api_key: os.environ/GROQ_API_KEY
+      timeout: os.environ/LITELLM_TIMEOUT_SECONDS
 
   - model_name: sql-planner-fallback
     litellm_params:
       model: os.environ/SQL_PLANNER_FALLBACK_MODEL
-      api_key: os.environ/ANTHROPIC_API_KEY
-      timeout: 12
+      api_key: os.environ/GROQ_API_KEY
+      timeout: os.environ/LITELLM_TIMEOUT_SECONDS
 
   - model_name: answer-primary
     litellm_params:

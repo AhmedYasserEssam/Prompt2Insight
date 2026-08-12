@@ -9,6 +9,7 @@ class Settings(BaseSettings):
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",
         extra="ignore",
+        enable_decoding=False,
     )
 
     app_env: str = "development"
@@ -22,7 +23,13 @@ class Settings(BaseSettings):
     )
     litellm_base_url: str = "http://localhost:4000/v1"
     litellm_master_key: str = "replace-this-in-production"
+    litellm_timeout_seconds: float = 60
     planner_primary_model: str = "sql-planner-primary"
+    vllm_base_url: str = "http://localhost:8000/v1"
+    vllm_api_key: str = "EMPTY"
+    vllm_model: str = "Qwen/Qwen3.5-9B"
+    vllm_timeout_seconds: float = 60
+    vllm_enabled: bool = False
     planner_fallback_model: str = "sql-planner-fallback"
     answer_primary_model: str = "answer-primary"
     answer_fallback_model: str = "answer-fallback"

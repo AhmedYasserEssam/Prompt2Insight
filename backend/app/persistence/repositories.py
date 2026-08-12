@@ -1,9 +1,21 @@
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.application.analytics.run_analytics_request import PlanningContext
+from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import AnalyticsRequest, AnalyticsResponse
-from app.persistence.models import AnalyticalRequestRecord, ConversationRecord, QueryExecutionRecord
+from app.domain.databases.models import SchemaSnapshot
+from app.infrastructure.catalogs.models import AnalyticsCatalog
+from app.persistence.models import (
+    AnalyticalRequestRecord,
+    CatalogRevisionRecord,
+    ConnectionProfileRecord,
+    ConversationRecord,
+    QueryExecutionRecord,
+    SchemaSnapshotRecord,
+)
 
 
 class AnalyticsRequestRepository:
@@ -23,6 +35,7 @@ class AnalyticsRequestRepository:
         conversation_id: UUID,
         request: AnalyticsRequest,
         response: AnalyticsResponse,
+        planning_context: PlanningContext | None = None,
     ) -> AnalyticsResponse:
         async with self._session_factory() as session:
             existing = await session.get(AnalyticalRequestRecord, request.request_id)
@@ -41,13 +54,28 @@ class AnalyticsRequestRepository:
                     response_language=request.response_language.value,
                     status=response.status.value,
                     response=response.model_dump(mode="json"),
+                    catalog_revision_id=(
+                        planning_context.catalog_revision_id
+                        if planning_context is not None
+                        else None
+                    ),
+                    schema_snapshot_id=(
+                        planning_context.schema_snapshot_id
+                        if planning_context is not None
+                        else None
+                    ),
                 )
             )
             session.add(
                 QueryExecutionRecord(
                     request_id=request.request_id,
                     status=response.status.value,
-                    latency_ms=0,
+                    latency_ms=(
+                        response.model_metadata.latency_ms
+                        if response.model_metadata is not None
+                        and response.model_metadata.latency_ms is not None
+                        else 0
+                    ),
                     model_metadata=(
                         response.model_metadata.model_dump(mode="json")
                         if response.model_metadata is not None
@@ -57,3 +85,42 @@ class AnalyticsRequestRepository:
             )
             await session.commit()
             return response
+
+    async def get_planning_context(self, conversation_id: UUID) -> PlanningContext:
+        async with self._session_factory() as session:
+            conversation = await session.get(ConversationRecord, conversation_id)
+            if conversation is None or conversation.connection_profile_id is None:
+                raise Prompt2InsightError(
+                    ErrorCode.NOT_CONFIGURED, "No connection profile is configured."
+                )
+            profile = await session.get(ConnectionProfileRecord, conversation.connection_profile_id)
+            if profile is None:
+                raise Prompt2InsightError(
+                    ErrorCode.NOT_CONFIGURED, "Connection profile is unavailable."
+                )
+            catalog = await session.scalar(
+                select(CatalogRevisionRecord)
+                .where(CatalogRevisionRecord.connection_profile_id == profile.id)
+                .order_by(CatalogRevisionRecord.created_at.desc())
+            )
+            snapshot = await session.scalar(
+                select(SchemaSnapshotRecord)
+                .where(SchemaSnapshotRecord.connection_profile_id == profile.id)
+                .order_by(SchemaSnapshotRecord.created_at.desc())
+            )
+            if catalog is None or snapshot is None:
+                raise Prompt2InsightError(
+                    ErrorCode.NOT_CONFIGURED, "Catalog or schema snapshot is unavailable."
+                )
+            schema_snapshot = SchemaSnapshot.model_validate(snapshot.snapshot)
+            if profile.dialect != schema_snapshot.dialect.value:
+                raise Prompt2InsightError(
+                    ErrorCode.SCHEMA_CHANGED, "Schema dialect no longer matches profile."
+                )
+            return PlanningContext(
+                dialect=schema_snapshot.dialect,
+                catalog=AnalyticsCatalog.model_validate(catalog.content),
+                schema_snapshot=schema_snapshot,
+                catalog_revision_id=catalog.id,
+                schema_snapshot_id=snapshot.id,
+            )
