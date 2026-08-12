@@ -70,7 +70,7 @@ def test_catalog_policy_rejects_undeclared_joins(catalog) -> None:
             dialect=SQLDialect.POSTGRES,
             policy=policy,
         )
-    assert captured.value.code is ErrorCode.SQL_POLICY_REJECTED
+    assert captured.value.code is ErrorCode.UNDECLARED_JOIN
 
 
 def test_privacy_rule_suppresses_small_groups(catalog) -> None:

@@ -1,0 +1,212 @@
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from app.application.analytics.execute_query_plan import QueryPlanExecutor
+from app.core.config import Settings
+from app.core.errors import ErrorCode, Prompt2InsightError
+from app.domain.analytics.models import QueryPlan
+from app.domain.databases.connector import SQLDatabaseConnector
+from app.domain.databases.models import (
+    ColumnMetadata,
+    DatabaseCapabilities,
+    ExplainResult,
+    PreparedQuery,
+    QueryResult,
+    SchemaSnapshot,
+    SQLDialect,
+    TableMetadata,
+)
+from app.infrastructure.catalogs.loader import load_catalog
+
+
+def snapshot() -> SchemaSnapshot:
+    return SchemaSnapshot(
+        dialect=SQLDialect.POSTGRES,
+        database_name="analytics",
+        server_version="16",
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
+        tables=[
+            TableMetadata(
+                schema_name="analytics",
+                table_name="orders",
+                table_type="table",
+                columns=[
+                    ColumnMetadata(name=name, data_type="integer", nullable=False)
+                    for name in ("id", "customer_id")
+                ]
+                + [ColumnMetadata(name="region", data_type="text", nullable=True)],
+            ),
+            TableMetadata(
+                schema_name="analytics",
+                table_name="order_items",
+                table_type="table",
+                columns=[
+                    ColumnMetadata(name="order_id", data_type="integer", nullable=False),
+                    ColumnMetadata(name="net_amount", data_type="numeric", nullable=False),
+                ],
+            ),
+        ],
+    )
+
+
+class Connector(SQLDatabaseConnector):
+    dialect = SQLDialect.POSTGRES
+
+    def __init__(self, current: SchemaSnapshot) -> None:
+        self.current = current
+        self.explained = False
+        self.executed = False
+
+    async def get_schema_snapshot(self) -> SchemaSnapshot:
+        return self.current
+
+    async def test_connection(self) -> None:
+        return None
+
+    async def explain(self, query: PreparedQuery) -> ExplainResult:
+        self.explained = True
+        return ExplainResult(raw_plan={}, estimated_rows=1, estimated_cost=1)
+
+    async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
+        self.executed = True
+        return QueryResult(
+            columns=["region", "revenue"], rows=[], row_count=0, truncated=False, duration_ms=1
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+def plan(sql: str) -> QueryPlan:
+    return QueryPlan(
+        status="ready",
+        response_language="en",
+        database_dialect=SQLDialect.POSTGRES,
+        interpretation="x",
+        metric_ids=["revenue"],
+        dimension_ids=["region"],
+        sql=sql,
+    )
+
+
+SAFE_SQL = (
+    "SELECT analytics.orders.region, SUM(analytics.order_items.net_amount) "
+    "FROM analytics.orders JOIN analytics.order_items "
+    "ON analytics.orders.id = analytics.order_items.order_id "
+    "GROUP BY analytics.orders.region "
+    "HAVING COUNT(DISTINCT analytics.orders.customer_id) >= 5"
+)
+
+
+async def test_schema_drift_stops_before_explain_and_execution() -> None:
+    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+    planned = snapshot()
+    changed = planned.model_copy(deep=True)
+    changed.tables[0].columns.append(
+        ColumnMetadata(name="new_column", data_type="text", nullable=True)
+    )
+    connector = Connector(changed)
+    with pytest.raises(Prompt2InsightError) as captured:
+        await QueryPlanExecutor().execute(
+            plan=plan(SAFE_SQL),
+            catalog=catalog,
+            schema_snapshot=planned,
+            connector=connector,
+            settings=Settings(),
+        )
+    assert captured.value.code is ErrorCode.SCHEMA_CHANGED
+    assert not connector.explained and not connector.executed
+
+
+async def test_current_schema_allows_execution() -> None:
+    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+    current = snapshot()
+    connector = Connector(current)
+    await QueryPlanExecutor().execute(
+        plan=plan(SAFE_SQL),
+        catalog=catalog,
+        schema_snapshot=current,
+        connector=connector,
+        settings=Settings(),
+    )
+    assert connector.explained and connector.executed
+
+
+@pytest.mark.parametrize(
+    ("mutate", "code"),
+    [
+        (lambda value: value.__setattr__("metric_ids", ["unknown"]), ErrorCode.METRIC_UNDEFINED),
+        (lambda value: value.__setattr__("dimension_ids", ["unknown"]), ErrorCode.METRIC_UNDEFINED),
+        (
+            lambda value: value.__setattr__("dimension_ids", ["product_category"]),
+            ErrorCode.METRIC_POLICY_VIOLATION,
+        ),
+        (
+            lambda value: value.__setattr__(
+                "sql",
+                SAFE_SQL.replace(
+                    "SUM(analytics.order_items.net_amount)", "AVG(analytics.order_items.net_amount)"
+                ),
+            ),
+            ErrorCode.METRIC_POLICY_VIOLATION,
+        ),
+        (
+            lambda value: value.__setattr__(
+                "sql", SAFE_SQL.replace("analytics.orders.customer_id", "analytics.orders.id")
+            ),
+            ErrorCode.PRIVACY_POLICY_VIOLATION,
+        ),
+        (
+            lambda value: value.__setattr__("sql", SAFE_SQL.replace(">= 5", ">= 4")),
+            ErrorCode.PRIVACY_POLICY_VIOLATION,
+        ),
+        (
+            lambda value: value.__setattr__(
+                "sql",
+                SAFE_SQL.replace(" HAVING COUNT(DISTINCT analytics.orders.customer_id) >= 5", ""),
+            ),
+            ErrorCode.PRIVACY_POLICY_VIOLATION,
+        ),
+    ],
+)
+async def test_semantic_and_privacy_policy_rejects_invalid_plan(
+    mutate: Callable[[QueryPlan], None], code: ErrorCode
+) -> None:
+    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+    current = snapshot()
+    candidate = plan(SAFE_SQL)
+    mutate(candidate)
+    connector = Connector(current)
+    with pytest.raises(Prompt2InsightError) as captured:
+        await QueryPlanExecutor().execute(
+            plan=candidate,
+            catalog=catalog,
+            schema_snapshot=current,
+            connector=connector,
+            settings=Settings(),
+        )
+    assert captured.value.code is code
+    assert not connector.explained and not connector.executed
+
+
+async def test_connector_row_bound_and_truncation_metadata() -> None:
+    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+    current = snapshot()
+
+    class TruncatingConnector(Connector):
+        async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
+            return QueryResult(
+                columns=["region"], rows=[["x"]] * 2, row_count=2, truncated=True, duration_ms=1
+            )
+
+    result = await QueryPlanExecutor().execute(
+        plan=plan(SAFE_SQL),
+        catalog=catalog,
+        schema_snapshot=current,
+        connector=TruncatingConnector(current),
+        settings=Settings(max_output_rows=2),
+    )
+    assert result.result.row_count <= 2
+    assert result.result.truncated

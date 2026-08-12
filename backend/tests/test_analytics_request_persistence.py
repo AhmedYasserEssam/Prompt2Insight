@@ -1,7 +1,9 @@
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.application.analytics.run_analytics_request import AnalyticsRequestService, PlanningContext
+from app.core.config import Settings
 from app.domain.analytics.models import (
     AnalyticsRequest,
     AnalyticsResponse,
@@ -9,7 +11,15 @@ from app.domain.analytics.models import (
     ModelExecutionMetadata,
     QueryPlan,
 )
-from app.domain.databases.models import DatabaseCapabilities, SchemaSnapshot, SQLDialect
+from app.domain.databases.models import (
+    ColumnMetadata,
+    DatabaseCapabilities,
+    ExplainResult,
+    QueryResult,
+    SchemaSnapshot,
+    SQLDialect,
+    TableMetadata,
+)
 from app.infrastructure.ai.litellm_gateway import GenerationResult, ModelGroup
 from app.infrastructure.catalogs.loader import load_catalog
 
@@ -81,6 +91,39 @@ class PlannerStub:
         return self.result
 
 
+class ConnectorStub:
+    dialect = SQLDialect.MYSQL
+
+    def __init__(self, snapshot: SchemaSnapshot) -> None:
+        self._snapshot = snapshot
+
+    async def get_schema_snapshot(self) -> SchemaSnapshot:
+        return self._snapshot
+
+    async def explain(self, query):
+        return ExplainResult(raw_plan={}, estimated_cost=1, estimated_rows=1)
+
+    async def execute_read_only(self, query):
+        return QueryResult(
+            columns=["region", "revenue"],
+            rows=[["Cairo", 10]],
+            row_count=1,
+            truncated=False,
+            duration_ms=1,
+        )
+
+    async def close(self):
+        pass
+
+
+class ConnectorResolverStub:
+    def __init__(self, snapshot: SchemaSnapshot) -> None:
+        self._snapshot = snapshot
+
+    async def connect(self, context):
+        return ConnectorStub(self._snapshot)
+
+
 async def test_production_request_reaches_planner_and_persists_planning_context() -> None:
     catalog, _ = load_catalog(
         Path(__file__).parents[2] / "catalogs" / "analytics_catalog.example.yaml"
@@ -92,7 +135,27 @@ async def test_production_request_reaches_planner_and_persists_planning_context(
             dialect=SQLDialect.MYSQL,
             database_name="analytics",
             server_version="8",
-            tables=[],
+            tables=[
+                TableMetadata(
+                    schema_name="analytics",
+                    table_name="orders",
+                    table_type="table",
+                    columns=[
+                        ColumnMetadata(name="id", data_type="integer", nullable=False),
+                        ColumnMetadata(name="region", data_type="text", nullable=True),
+                        ColumnMetadata(name="customer_id", data_type="integer", nullable=False),
+                    ],
+                ),
+                TableMetadata(
+                    schema_name="analytics",
+                    table_name="order_items",
+                    table_type="table",
+                    columns=[
+                        ColumnMetadata(name="order_id", data_type="integer", nullable=False),
+                        ColumnMetadata(name="net_amount", data_type="numeric", nullable=False),
+                    ],
+                ),
+            ],
             capabilities=DatabaseCapabilities(dialect=SQLDialect.MYSQL, server_version="8"),
         ),
         catalog_revision_id=uuid4(),
@@ -103,6 +166,15 @@ async def test_production_request_reaches_planner_and_persists_planning_context(
         response_language="ar",
         database_dialect=SQLDialect.MYSQL,
         interpretation="الإيرادات حسب الشهر",
+        metric_ids=["revenue"],
+        dimension_ids=["region"],
+        sql=(
+            "SELECT analytics.orders.region, SUM(analytics.order_items.net_amount) AS revenue "
+            "FROM analytics.orders JOIN analytics.order_items "
+            "ON analytics.orders.id = analytics.order_items.order_id "
+            "GROUP BY analytics.orders.region "
+            "HAVING COUNT(DISTINCT analytics.orders.customer_id) >= 5"
+        ),
     )
     planner = PlannerStub(
         GenerationResult(
@@ -119,12 +191,15 @@ async def test_production_request_reaches_planner_and_persists_planning_context(
         planning_context_store=repository,
         planner=planner,
         planner_model_group=ModelGroup("planner", "primary", "fallback", QueryPlan),
+        query_executor=QueryPlanExecutor(),
+        connector_resolver=ConnectorResolverStub(context.schema_snapshot),
+        settings=Settings(mock_mode=False),
     )
     request = AnalyticsRequest(request_id=uuid4(), question="وريني revenue لكل شهر في 2025")
 
     response = await service.run(conversation_id=uuid4(), request=request)
 
-    assert response.status is AnalyticsStatus.PLANNED
+    assert response.status is AnalyticsStatus.SUCCESS
     assert response.query_plan == plan
     assert response.model_metadata == planner.result.metadata
     assert repository.saved_context == context
