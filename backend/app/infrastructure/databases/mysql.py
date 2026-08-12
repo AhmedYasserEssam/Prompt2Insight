@@ -37,19 +37,30 @@ class MySQLConnector(SQLAlchemyConnectorBase):
             async with self._engine.connect() as connection:
                 raw = (
                     await connection.execute(
-                        text(f"EXPLAIN FORMAT=JSON {query.sql}"),
-                        query.parameters,
+                        text(f"EXPLAIN FORMAT=JSON {query.sql}"), query.parameters
                     )
                 ).scalar_one()
         except SQLAlchemyError as error:
             raise self._normalize_error(error) from error
+        return self._parse_explain(raw)
 
-        plan: dict[str, Any] = raw if isinstance(raw, dict) else json.loads(raw)
-        root = plan["query_block"]
+    @staticmethod
+    def _parse_explain(raw: Any) -> ExplainResult:
+        try:
+            plan: dict[str, Any] = raw if isinstance(raw, dict) else json.loads(raw)
+            root = plan["query_block"]
+            cost = root.get("cost_info", {}).get("query_cost")
+            rows = MySQLConnector._estimated_rows(root)
+            if cost is None or rows is None:
+                raise ValueError("missing MySQL EXPLAIN estimates")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise Prompt2InsightError(
+                ErrorCode.EXECUTION_FAILED, "The query plan could not be interpreted safely."
+            ) from error
         return ExplainResult(
             raw_plan=plan,
-            estimated_cost=float(root.get("cost_info", {}).get("query_cost", 0)),
-            estimated_rows=self._estimated_rows(root),
+            estimated_cost=float(cost),
+            estimated_rows=rows,
         )
 
     async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
@@ -92,6 +103,8 @@ class MySQLConnector(SQLAlchemyConnectorBase):
     def _estimated_rows(node: dict[str, Any]) -> int | None:
         if "rows_produced_per_join" in node:
             return int(node["rows_produced_per_join"])
+        if "rows_examined_per_scan" in node:
+            return int(node["rows_examined_per_scan"])
         for value in node.values():
             if isinstance(value, dict):
                 rows = MySQLConnector._estimated_rows(value)

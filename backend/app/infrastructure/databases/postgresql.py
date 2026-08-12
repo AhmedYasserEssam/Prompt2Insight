@@ -44,12 +44,25 @@ class PostgreSQLConnector(SQLAlchemyConnectorBase):
         except SQLAlchemyError as error:
             raise self._normalize_error(error) from error
 
-        plan = raw if isinstance(raw, list) else json.loads(raw)
-        root: dict[str, Any] = plan[0]["Plan"]
+        return self._parse_explain(raw)
+
+    @staticmethod
+    def _parse_explain(raw: Any) -> ExplainResult:
+        try:
+            plan = raw if isinstance(raw, list) else json.loads(raw)
+            root: dict[str, Any] = plan[0]["Plan"]
+            cost = root["Total Cost"]
+            rows = root["Plan Rows"]
+            if cost is None or rows is None:
+                raise ValueError("missing PostgreSQL EXPLAIN estimates")
+        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise Prompt2InsightError(
+                ErrorCode.EXECUTION_FAILED, "The query plan could not be interpreted safely."
+            ) from error
         return ExplainResult(
             raw_plan=plan,
-            estimated_cost=float(root.get("Total Cost", 0)),
-            estimated_rows=int(root.get("Plan Rows", 0)),
+            estimated_cost=float(cost),
+            estimated_rows=int(rows),
         )
 
     async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
@@ -60,6 +73,10 @@ class PostgreSQLConnector(SQLAlchemyConnectorBase):
                     transaction = await connection.begin()
                     try:
                         await connection.execute(text("SET TRANSACTION READ ONLY"))
+                        await connection.execute(
+                            text("SELECT set_config('lock_timeout', :value, true)"),
+                            {"value": f"{query.lock_timeout_ms}ms"},
+                        )
                         await connection.execute(
                             text("SELECT set_config('statement_timeout', :value, true)"),
                             {"value": f"{query.timeout_ms}ms"},

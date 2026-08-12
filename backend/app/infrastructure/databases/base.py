@@ -61,12 +61,8 @@ class SQLAlchemyConnectorBase(SQLDatabaseConnector):
         output: list[TableMetadata] = []
 
         for schema in schemas:
-            names = [
-                ("table", name) for name in inspector.get_table_names(schema=schema)
-            ]
-            names += [
-                ("view", name) for name in inspector.get_view_names(schema=schema)
-            ]
+            names = [("table", name) for name in inspector.get_table_names(schema=schema)]
+            names += [("view", name) for name in inspector.get_view_names(schema=schema)]
 
             for table_type, name in names:
                 columns = [
@@ -117,6 +113,10 @@ class SQLAlchemyConnectorBase(SQLDatabaseConnector):
             )
         ):
             return Prompt2InsightError(ErrorCode.QUERY_TIMEOUT, "The query timed out.")
+        if any(marker in message for marker in ("lock timeout", "lock wait timeout", "deadlock")):
+            return Prompt2InsightError(
+                ErrorCode.LOCK_TIMEOUT, "The query could not acquire a lock."
+            )
         if any(
             marker in message
             for marker in (
