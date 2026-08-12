@@ -1,3 +1,4 @@
+from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import select
@@ -70,6 +71,29 @@ class AnalyticsRequestRepository:
                 QueryExecutionRecord(
                     request_id=request.request_id,
                     status=response.status.value,
+                    sql_hash=(sha256(response.sql.encode()).hexdigest() if response.sql else None),
+                    validated_sql=response.sql,
+                    dialect=(
+                        response.query_plan.database_dialect.value if response.query_plan else None
+                    ),
+                    plan_metadata=(
+                        {
+                            "metric_ids": response.query_plan.metric_ids,
+                            "dimension_ids": response.query_plan.dimension_ids,
+                            "parameters": response.query_plan.parameters,
+                            "fallback_used": response.model_metadata.fallback_used
+                            if response.model_metadata
+                            else False,
+                            "fallback_reason": response.model_metadata.fallback_reason
+                            if response.model_metadata
+                            else None,
+                        }
+                        if response.query_plan
+                        else {}
+                    ),
+                    row_count=(response.table and len(response.table.rows)),
+                    truncated=any("truncated" in warning.lower() for warning in response.warnings),
+                    error_code=response.error_code.value if response.error_code else None,
                     latency_ms=(
                         response.model_metadata.latency_ms
                         if response.model_metadata is not None
@@ -123,4 +147,6 @@ class AnalyticsRequestRepository:
                 schema_snapshot=schema_snapshot,
                 catalog_revision_id=catalog.id,
                 schema_snapshot_id=snapshot.id,
+                connection_profile_id=profile.id,
+                credential_reference=profile.credential_reference,
             )
