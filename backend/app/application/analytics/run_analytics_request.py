@@ -2,7 +2,9 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.application.analytics.resolve_language import resolve_response_language
+from app.core.config import Settings
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import (
     AnalyticsRequest,
@@ -10,6 +12,7 @@ from app.domain.analytics.models import (
     AnalyticsStatus,
     QueryPlan,
 )
+from app.domain.databases.connector import SQLDatabaseConnector
 from app.domain.databases.models import SchemaSnapshot, SQLDialect
 from app.infrastructure.ai.litellm_gateway import GenerationResult, ModelGroup
 from app.infrastructure.catalogs.models import AnalyticsCatalog
@@ -22,6 +25,8 @@ class PlanningContext:
     schema_snapshot: SchemaSnapshot
     catalog_revision_id: UUID
     schema_snapshot_id: UUID
+    connection_profile_id: UUID | None = None
+    credential_reference: str | None = None
 
 
 class AnalyticsRequestStore(Protocol):
@@ -53,6 +58,10 @@ class QueryPlanner(Protocol):
     ) -> GenerationResult[QueryPlan]: ...
 
 
+class ConnectorResolver(Protocol):
+    async def connect(self, context: PlanningContext) -> SQLDatabaseConnector: ...
+
+
 class AnalyticsRequestService:
     def __init__(
         self,
@@ -62,16 +71,20 @@ class AnalyticsRequestService:
         planning_context_store: PlanningContextStore | None = None,
         planner: QueryPlanner | None = None,
         planner_model_group: ModelGroup[QueryPlan] | None = None,
+        query_executor: QueryPlanExecutor | None = None,
+        connector_resolver: ConnectorResolver | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._mock_mode = mock_mode
         self._repository = repository
         self._planning_context_store = planning_context_store
         self._planner = planner
         self._planner_model_group = planner_model_group
+        self._query_executor = query_executor
+        self._connector_resolver = connector_resolver
+        self._settings = settings
 
-    async def run(
-        self, *, conversation_id: UUID, request: AnalyticsRequest
-    ) -> AnalyticsResponse:
+    async def run(self, *, conversation_id: UUID, request: AnalyticsRequest) -> AnalyticsResponse:
         existing = await self._repository.get(request.request_id)
         if existing is not None:
             return existing
@@ -111,7 +124,42 @@ class AnalyticsRequestService:
                 schema_snapshot=context.schema_snapshot,
                 model_group=self._planner_model_group,
             )
-            response = self._planner_response(request=request, result=result)
+            if result.output.status != "ready":
+                response = self._planner_response(request=request, result=result)
+            elif (
+                self._query_executor is None
+                or self._connector_resolver is None
+                or self._settings is None
+            ):
+                raise RuntimeError("Production execution dependencies are not configured.")
+            else:
+                connector = await self._connector_resolver.connect(context)
+                try:
+                    execution = await self._query_executor.execute(
+                        plan=result.output,
+                        catalog=context.catalog,
+                        schema_snapshot=context.schema_snapshot,
+                        connector=connector,
+                        settings=self._settings,
+                    )
+                finally:
+                    await connector.close()
+                response = AnalyticsResponse(
+                    status=(
+                        AnalyticsStatus.EMPTY_RESULT
+                        if execution.result.row_count == 0
+                        else AnalyticsStatus.SUCCESS
+                    ),
+                    request_id=request.request_id,
+                    language=result.output.response_language,
+                    table=self._query_executor.result_table(execution.result),
+                    sql=execution.validated.normalized_sql,
+                    query_plan=result.output,
+                    warnings=["Result rows were truncated to the configured limit."]
+                    if execution.result.truncated
+                    else [],
+                    model_metadata=result.metadata,
+                )
         except Prompt2InsightError as exc:
             response = AnalyticsResponse(
                 status=AnalyticsStatus.FAILED,

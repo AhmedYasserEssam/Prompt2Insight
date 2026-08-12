@@ -4,8 +4,8 @@ from app.domain.databases.models import (
     ExplainResult,
     PreparedQuery,
     QueryResult,
-    SQLDialect,
     SchemaSnapshot,
+    SQLDialect,
 )
 
 
