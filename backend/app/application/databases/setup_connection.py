@@ -6,6 +6,7 @@ from app.domain.databases.connection_profiles import (
     ConnectionProfileInput,
     ConnectionProfileView,
     ConnectionTestResult,
+    SchemaRefreshResult,
     SetupProgress,
 )
 from app.domain.databases.connector import SQLDatabaseConnector
@@ -84,4 +85,32 @@ class ConnectionSetupService:
             schema_state="ready",
             catalog_state="ready",
             conversation_id=await self._repository.create_conversation(profile_id),
+        )
+
+    async def refresh_schema(self, profile_id: UUID) -> SchemaRefreshResult:
+        profile = await self._repository.get_input(profile_id)
+        if profile is None:
+            raise Prompt2InsightError(
+                ErrorCode.NOT_CONFIGURED, "Connection profile is unavailable."
+            )
+        connector = self._connector(profile)
+        try:
+            await connector.test_connection()
+            try:
+                snapshot = await connector.get_schema_snapshot()
+            except Prompt2InsightError as error:
+                raise Prompt2InsightError(
+                    ErrorCode.SCHEMA_INTROSPECTION_FAILED,
+                    "Could not read the database schema.",
+                ) from error
+        finally:
+            await connector.close()
+        snapshot_record, schema_changed = await self._repository.refresh_snapshot(
+            profile_id, snapshot
+        )
+        return SchemaRefreshResult(
+            profile_id=profile_id,
+            schema_snapshot_id=snapshot_record.id,
+            schema_changed=schema_changed,
+            state=await self._repository.state_for_snapshot(profile_id, snapshot_record.id),
         )

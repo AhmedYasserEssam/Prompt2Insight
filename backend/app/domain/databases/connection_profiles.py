@@ -43,6 +43,13 @@ class SetupProgress(BaseModel):
     conversation_id: UUID | None = None
 
 
+class SchemaRefreshResult(BaseModel):
+    profile_id: UUID
+    schema_snapshot_id: UUID
+    schema_changed: bool
+    state: str
+
+
 class CatalogValidationResult(BaseModel):
     valid: bool
     errors: list[str] = Field(default_factory=list)

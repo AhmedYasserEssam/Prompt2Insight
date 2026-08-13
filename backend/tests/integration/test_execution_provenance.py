@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.analytics.run_analytics_request import PlanningContext
 from app.application.databases.configure_catalog import CatalogConfigurationService
+from app.application.databases.setup_connection import ConnectionSetupService
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import (
     AnalyticsRequest,
@@ -19,6 +20,7 @@ from app.domain.analytics.models import (
     QueryPlan,
     ResultTable,
 )
+from app.domain.databases.connection_profiles import ConnectionProfileInput
 from app.domain.databases.models import (
     ColumnMetadata,
     DatabaseCapabilities,
@@ -439,3 +441,74 @@ async def test_schema_snapshot_persists_postgres_namespace(
     assert record is not None
     assert record.snapshot["tables"][0]["schema_name"] == "analytics"  # type: ignore[index]
     assert SchemaSnapshot.model_validate(record.snapshot).tables[0].schema_name == "analytics"
+
+
+async def test_refresh_schema_persists_current_postgres_namespace_and_preserves_history(
+    repository: AnalyticsRequestRepository,
+) -> None:
+    if os.getenv("P2I_RUN_INTEGRATION") != "1":
+        pytest.skip("set P2I_RUN_INTEGRATION=1 to run the live PostgreSQL refresh test")
+    factory = repository._session_factory
+    profiles = ConnectionProfileRepository(factory)
+    profile = await profiles.create(
+        ConnectionProfileInput(
+            name=str(uuid4()),
+            dialect=SQLDialect.POSTGRES,
+            host="postgres-analytics",
+            port=5432,
+            database_name="analytics",
+            username="analytics",
+            credential_reference="P2I_POSTGRES_ANALYTICS_URL",
+        )
+    )
+    old_snapshot = SchemaSnapshot(
+        dialect=SQLDialect.POSTGRES,
+        database_name="analytics",
+        server_version="16",
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
+        tables=[
+            TableMetadata(schema_name=None, table_name="sales", table_type="table", columns=[])
+        ],
+    )
+    await profiles.save_snapshot(profile.id, old_snapshot)
+    old_record = await profiles.get_schema_snapshot_record(profile.id)
+    assert old_record is not None
+    old_snapshot_id = old_record.id
+    old_snapshot_content = old_record.snapshot
+    async with factory() as session:
+        session.add(
+            CatalogRevisionRecord(
+                connection_profile_id=profile.id,
+                schema_snapshot_id=old_snapshot_id,
+                content_hash=sha256(str(uuid4()).encode()).hexdigest(),
+                content={
+                    "catalog_version": "test",
+                    "metrics": {},
+                    "dimensions": {},
+                    "join_contracts": [],
+                    "column_policies": {},
+                    "privacy": {"privacy_unit": "sales.id", "minimum_group_size": 1},
+                },
+            )
+        )
+        await session.commit()
+
+    result = await ConnectionSetupService(profiles).refresh_schema(profile.id)
+    refreshed = await profiles.get_schema_snapshot_record(profile.id)
+
+    assert result.schema_changed
+    assert result.state == "stale"
+    assert refreshed is not None and refreshed.id != old_snapshot_id
+    assert any(
+        table["schema_name"] == "analytics" and table["table_name"] == "sales"
+        for table in refreshed.snapshot["tables"]  # type: ignore[index]
+    )
+    async with factory() as session:
+        preserved_old = await session.get(SchemaSnapshotRecord, old_snapshot_id)
+        catalog = await session.scalar(
+            select(CatalogRevisionRecord).where(
+                CatalogRevisionRecord.connection_profile_id == profile.id
+            )
+        )
+    assert preserved_old is not None and preserved_old.snapshot == old_snapshot_content
+    assert catalog is not None and catalog.schema_snapshot_id == old_snapshot_id

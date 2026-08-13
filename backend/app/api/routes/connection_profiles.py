@@ -9,6 +9,7 @@ from app.domain.databases.connection_profiles import (
     ConnectionProfileInput,
     ConnectionProfileView,
     ConnectionTestResult,
+    SchemaRefreshResult,
     SetupProgress,
 )
 
@@ -38,3 +39,10 @@ async def setup_profile(
 @router.post("/{profile_id}/select", response_model=SetupProgress)
 async def select_profile(profile_id: UUID, service: ConnectionSetupDependency) -> SetupProgress:
     return await service.select(profile_id)
+
+
+@router.post("/{profile_id}/refresh-schema", response_model=SchemaRefreshResult)
+async def refresh_schema(
+    profile_id: UUID, service: ConnectionSetupDependency
+) -> SchemaRefreshResult:
+    return await service.refresh_schema(profile_id)

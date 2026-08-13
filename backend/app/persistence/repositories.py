@@ -132,7 +132,7 @@ class AnalyticsRequestRepository:
             snapshot = await session.scalar(
                 select(SchemaSnapshotRecord)
                 .where(SchemaSnapshotRecord.connection_profile_id == profile.id)
-                .order_by(SchemaSnapshotRecord.created_at.desc())
+                .order_by(SchemaSnapshotRecord.created_at.desc(), SchemaSnapshotRecord.id.desc())
             )
             if catalog is None or snapshot is None:
                 raise Prompt2InsightError(
@@ -186,14 +186,18 @@ class ConnectionProfileRepository:
             output: list[ConnectionProfileView] = []
             for record in records:
                 snapshot = await session.scalar(
-                    select(SchemaSnapshotRecord.id).where(
-                        SchemaSnapshotRecord.connection_profile_id == record.id
+                    select(SchemaSnapshotRecord.id)
+                    .where(SchemaSnapshotRecord.connection_profile_id == record.id)
+                    .order_by(
+                        SchemaSnapshotRecord.created_at.desc(), SchemaSnapshotRecord.id.desc()
                     )
                 )
                 catalog = await session.scalar(
-                    select(CatalogRevisionRecord).where(
-                        CatalogRevisionRecord.connection_profile_id == record.id
-                    ).order_by(CatalogRevisionRecord.created_at.desc())
+                    select(CatalogRevisionRecord)
+                    .where(CatalogRevisionRecord.connection_profile_id == record.id)
+                    .order_by(
+                        CatalogRevisionRecord.created_at.desc(), CatalogRevisionRecord.id.desc()
+                    )
                 )
                 state = (
                     "ready"
@@ -226,6 +230,55 @@ class ConnectionProfileRepository:
             )
             await session.commit()
 
+    async def get_input(self, profile_id: UUID) -> ConnectionProfileInput | None:
+        async with self._session_factory() as session:
+            record = await session.get(ConnectionProfileRecord, profile_id)
+            if record is None:
+                return None
+            return ConnectionProfileInput(
+                name=record.name,
+                dialect=SQLDialect(record.dialect),
+                host=record.host,
+                port=record.port,
+                database_name=record.database_name,
+                username=record.username,
+                credential_reference=record.credential_reference,
+            )
+
+    async def refresh_snapshot(
+        self, profile_id: UUID, snapshot: SchemaSnapshot
+    ) -> tuple[SchemaSnapshotRecord, bool]:
+        """Append a changed snapshot, or retain the current immutable snapshot."""
+        content_hash = snapshot.fingerprint()
+        async with self._session_factory() as session:
+            current = await session.scalar(
+                select(SchemaSnapshotRecord)
+                .where(SchemaSnapshotRecord.connection_profile_id == profile_id)
+                .order_by(SchemaSnapshotRecord.created_at.desc(), SchemaSnapshotRecord.id.desc())
+            )
+            if current is not None and current.content_hash == content_hash:
+                return current, False
+            record = SchemaSnapshotRecord(
+                connection_profile_id=profile_id,
+                content_hash=content_hash,
+                snapshot=snapshot.model_dump(mode="json"),
+            )
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record, True
+
+    async def state_for_snapshot(self, profile_id: UUID, snapshot_id: UUID) -> str:
+        async with self._session_factory() as session:
+            catalog = await session.scalar(
+                select(CatalogRevisionRecord)
+                .where(CatalogRevisionRecord.connection_profile_id == profile_id)
+                .order_by(CatalogRevisionRecord.created_at.desc(), CatalogRevisionRecord.id.desc())
+            )
+            if catalog is None:
+                return "catalog_needs_configuration"
+            return "ready" if catalog.schema_snapshot_id == snapshot_id else "stale"
+
     async def create_conversation(self, profile_id: UUID) -> UUID:
         from uuid import uuid4
 
@@ -242,7 +295,7 @@ class ConnectionProfileRepository:
             record = await session.scalar(
                 select(SchemaSnapshotRecord)
                 .where(SchemaSnapshotRecord.connection_profile_id == profile_id)
-                .order_by(SchemaSnapshotRecord.created_at.desc())
+                .order_by(SchemaSnapshotRecord.created_at.desc(), SchemaSnapshotRecord.id.desc())
             )
             return record
 
@@ -257,7 +310,7 @@ class ConnectionProfileRepository:
             record = await session.scalar(
                 select(CatalogRevisionRecord)
                 .where(CatalogRevisionRecord.connection_profile_id == profile_id)
-                .order_by(CatalogRevisionRecord.created_at.desc())
+                .order_by(CatalogRevisionRecord.created_at.desc(), CatalogRevisionRecord.id.desc())
             )
             if record is None:
                 return None
@@ -278,7 +331,7 @@ class ConnectionProfileRepository:
             current_snapshot_id = await session.scalar(
                 select(SchemaSnapshotRecord.id)
                 .where(SchemaSnapshotRecord.connection_profile_id == profile_id)
-                .order_by(SchemaSnapshotRecord.created_at.desc())
+                .order_by(SchemaSnapshotRecord.created_at.desc(), SchemaSnapshotRecord.id.desc())
             )
             if current_snapshot_id != schema_snapshot_id:
                 raise Prompt2InsightError(

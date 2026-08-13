@@ -37,6 +37,13 @@ export type SetupProgress = {
   conversation_id?: string | null;
 };
 
+export type SchemaRefreshResult = {
+  profile_id: string;
+  schema_snapshot_id: string;
+  schema_changed: boolean;
+  state: ConnectionProfile["state"];
+};
+
 export type SchemaSnapshot = {dialect: "postgres" | "mysql"; database_name: string; tables: {schema_name: string | null; table_name: string; table_type: string; columns: {name: string; data_type: string; nullable: boolean}[]}[]};
 export type Catalog = {catalog_version: string; metrics: Record<string, Definition & {allowed_dimensions: string[]}>; dimensions: Record<string, Definition>; join_contracts: {left: string; right: string; relationship: string; allowed_types: string[]}[]; column_policies: Record<string, "non_sensitive" | "sensitive" | "prohibited">; privacy: {privacy_unit: string; minimum_group_size: number}};
 type Definition = {labels: {en: string; ar: string}; aliases: {en: string[]; ar: string[]}; descriptions: {en: string; ar: string}; expressions: {postgres: string; mysql: string}};
@@ -98,6 +105,10 @@ export function setupConnection(input: ConnectionProfileInput): Promise<SetupPro
 
 export function selectConnection(profileId: string): Promise<SetupProgress> {
   return connectionRequest(`/${profileId}/select`, {method: "POST"});
+}
+
+export function refreshConnectionSchema(profileId: string): Promise<SchemaRefreshResult> {
+  return connectionRequest(`/${profileId}/refresh-schema`, {method: "POST"});
 }
 
 export function getCatalogStatus(profileId: string): Promise<CatalogStatus> { return connectionRequest(`/${profileId}/catalog`); }
