@@ -72,6 +72,13 @@ def test_litellm_answer_aliases_use_groq_provider_model_variables() -> None:
     assert models["answer-fallback"]["model"] == "os.environ/LITELLM_ANSWER_FALLBACK_MODEL"
     assert models["answer-primary"]["api_key"] == "os.environ/GROQ_API_KEY"
     assert models["answer-fallback"]["api_key"] == "os.environ/GROQ_API_KEY"
+    assert models["answer-primary"]["reasoning_effort"] == "none"
+    assert models["answer-primary"]["reasoning_format"] == "hidden"
+    assert models["answer-fallback"]["reasoning_effort"] == "low"
+    assert models["answer-fallback"]["reasoning_effort"] != "none"
+    assert models["answer-fallback"]["reasoning_format"] == "hidden"
+    assert models["sql-planner-primary"]["reasoning_effort"] == "none"
+    assert models["sql-planner-fallback"]["reasoning_effort"] == "low"
     assert config["router_settings"]["fallbacks"][-1] == {
         "answer-primary": ["answer-fallback"]
     }
@@ -95,6 +102,7 @@ async def test_primary_provider_failure_retries_then_uses_fallback() -> None:
         "answer-primary",
         "answer-fallback",
     ]
+    assert all(call["extra_body"] is None for call in completions.calls)
     assert result.output.answer == "Done"
     assert result.metadata.actual_model == "resolved-model"
     assert result.metadata.fallback_used is True
@@ -165,7 +173,7 @@ async def test_qwen_planner_uses_catalog_context_and_explicit_dialect(
     assert question in request["messages"][1]["content"]
     assert dialect.value in request["messages"][0]["content"]
     assert "revenue" in request["messages"][1]["content"]
-    assert request["extra_body"] == {"reasoning_effort": "none", "reasoning_format": "hidden"}
+    assert request["extra_body"] is None
     assert result.metadata.provider == "litellm"
     assert result.metadata.model == "resolved-model"
     assert result.metadata.generation_stage == "planner"

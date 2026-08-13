@@ -324,7 +324,7 @@ enforcement and application security validation remain authoritative."""
 
 
 class LiteLLMGateway(VLLMGateway):
-    """Existing LiteLLM proxy gateway used by the normal hosted-model path."""
+    """LiteLLM proxy gateway; provider-specific options live in the proxy config."""
 
     def __init__(
         self,
@@ -340,7 +340,6 @@ class LiteLLMGateway(VLLMGateway):
             timeout_seconds=timeout_seconds,
             client=client,
             provider="litellm",
-            thinking_options={"reasoning_effort": "none", "reasoning_format": "hidden"},
         )
 
     @classmethod

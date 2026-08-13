@@ -1,3 +1,5 @@
+from datetime import date, datetime
+
 import pytest
 
 from app.application.analytics.answer_validation import validate_answer_output
@@ -31,7 +33,7 @@ def test_rejects_ungrounded_numeric_token_with_internal_detail() -> None:
         validate_answer_output(
             AnswerOutput(answer="There are 48 monthly observations."),
             ResultTable(columns=["revenue"], rows=[[100], [200]]),
-    )
+        )
 
     assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
     assert "'48'" in raised.value.message
@@ -52,10 +54,59 @@ def test_accepts_arabic_digits_for_exact_returned_value() -> None:
     )
 
 
-def test_percentage_token_currently_matches_its_numeric_value() -> None:
+@pytest.mark.parametrize(
+    "returned_date",
+    [
+        date(2015, 1, 1),
+        datetime(2015, 1, 1),
+        "2015-01-01",
+        "2015-01-01T00:00:00",
+    ],
+)
+def test_returned_date_grounds_its_year(returned_date: object) -> None:
+    validate_answer_output(
+        AnswerOutput(answer="Revenue starts in 2015."),
+        ResultTable(columns=["order_month"], rows=[[returned_date]]),
+    )
+
+
+@pytest.mark.parametrize("ungrounded", ["48", "12", "3"])
+def test_returned_date_does_not_ground_derived_count_month_or_day(ungrounded: str) -> None:
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(answer=f"The result contains {ungrounded}."),
+            ResultTable(columns=["order_month"], rows=[["2015-12-03"]]),
+        )
+
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+
+
+def test_arbitrary_result_string_does_not_ground_embedded_number() -> None:
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(answer="Product number 123."),
+            ResultTable(columns=["product"], rows=[["Product 123"]]),
+        )
+
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+
+
+@pytest.mark.parametrize("percentage", ["10%", "\u0661\u0660\u066a"])
+def test_numeric_result_does_not_ground_percentage_token(percentage: str) -> None:
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(answer=f"Revenue increased by {percentage}."),
+            ResultTable(columns=["revenue"], rows=[[10]]),
+        )
+
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+    assert repr(percentage) in raised.value.message
+
+
+def test_explicit_percentage_result_grounds_percentage_token() -> None:
     validate_answer_output(
         AnswerOutput(answer="Revenue increased by 10%."),
-        ResultTable(columns=["revenue"], rows=[[10]]),
+        ResultTable(columns=["growth"], rows=[["10%"]]),
     )
 
 
