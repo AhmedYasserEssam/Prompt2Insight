@@ -33,12 +33,15 @@ def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
             )
 
     result_tokens: set[_NumericToken] = set()
+    result_text_values: set[str] = set()
     for row in table.rows:
         for value in row:
             if (number := _as_numeric_token(value)) is not None:
                 result_tokens.add(number)
             if (year := _grounded_date_year(value)) is not None:
                 result_tokens.add(_NumericToken(year))
+            if (text_value := _as_grounded_text_value(value)) is not None:
+                result_text_values.add(text_value)
     text = "\n".join(
         [
             output.answer,
@@ -47,15 +50,48 @@ def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
             *([output.chart.title] if output.chart is not None else []),
         ]
     )
-    for match in _NUMBER.findall(text):
-        token = _as_numeric_token(match)
+    grounded_text_spans = _find_grounded_text_spans(text, result_text_values)
+    for match in _NUMBER.finditer(text):
+        if _is_within_grounded_text_span(match.span(), grounded_text_spans):
+            continue
+        raw_token = match.group()
+        token = _as_numeric_token(raw_token)
         if token is None or token not in result_tokens:
             normalized = token.value if token is not None else None
             raise Prompt2InsightError(
                 ErrorCode.LLM_INVALID_OUTPUT,
-                f"The answer contains an ungrounded numeric value: {match!r} "
+                f"The answer contains an ungrounded numeric value: {raw_token!r} "
                 f"(normalized={normalized!s}).",
             )
+
+
+def _as_grounded_text_value(value: Any) -> str | None:
+    if not isinstance(value, str) or not any(character.isalpha() for character in value):
+        return None
+    if _as_numeric_token(value) is not None or _grounded_date_year(value) is not None:
+        return None
+    return value
+
+
+def _find_grounded_text_spans(text: str, values: set[str]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for value in values:
+        start = 0
+        while (start := text.find(value, start)) != -1:
+            end = start + len(value)
+            spans.append((start, end))
+            start += 1
+    return spans
+
+
+def _is_within_grounded_text_span(
+    token_span: tuple[int, int], grounded_text_spans: list[tuple[int, int]]
+) -> bool:
+    token_start, token_end = token_span
+    return any(
+        grounded_start <= token_start and token_end <= grounded_end
+        for grounded_start, grounded_end in grounded_text_spans
+    )
 
 
 def _as_numeric_token(value: Any) -> _NumericToken | None:

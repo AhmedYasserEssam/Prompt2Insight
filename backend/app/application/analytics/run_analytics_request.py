@@ -272,6 +272,8 @@ def _answer_system_prompt(language: str) -> str:
     return f"""You are the Prompt2Insight answer writer. Respond in {language}.
 Use only the executed result table supplied by the user. Do not calculate, estimate, infer,
 or mention any number that is not literally present in that table. Keep the answer concise.
+Preserve the exact returned text of categorical and entity values; do not rename, abbreviate,
+translate, or otherwise alter identifiers or product names.
 You may propose a chart only by referencing exact result-table column names in x_column and
 y_columns. Never include data points or values in a chart specification. Localize the answer,
 chart title, warnings, and empty-state wording to the requested language. Return only the

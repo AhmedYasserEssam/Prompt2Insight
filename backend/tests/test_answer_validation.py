@@ -91,12 +91,113 @@ def test_arbitrary_result_string_does_not_ground_embedded_number() -> None:
     assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
 
 
+def test_exact_returned_text_grounds_its_embedded_integer_occurrence() -> None:
+    validate_answer_output(
+        AnswerOutput(
+            answer=(
+                "Canon imageCLASS 2200 Advanced Copier has the highest sales at 61,599.824."
+            )
+        ),
+        ResultTable(
+            columns=["product_name", "total_sales"],
+            rows=[["Canon imageCLASS 2200 Advanced Copier", 61599.824]],
+        ),
+    )
+
+
+def test_exact_returned_text_grounds_its_embedded_decimal_occurrence() -> None:
+    validate_answer_output(
+        AnswerOutput(answer="Samsung Galaxy Mega 6.3 had the highest sales."),
+        ResultTable(columns=["product_name"], rows=[["Samsung Galaxy Mega 6.3"]]),
+    )
+
+
+def test_multiple_exact_returned_text_values_ground_embedded_numbers() -> None:
+    validate_answer_output(
+        AnswerOutput(
+            answer=(
+                "HON 5400 Series Task Chairs for Big and Tall ranked above "
+                "Samsung Galaxy Mega 6.3."
+            )
+        ),
+        ResultTable(
+            columns=["product_name"],
+            rows=[
+                ["HON 5400 Series Task Chairs for Big and Tall"],
+                ["Samsung Galaxy Mega 6.3"],
+            ],
+        ),
+    )
+
+
+def test_second_standalone_occurrence_of_embedded_number_is_rejected() -> None:
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(
+                answer="Canon imageCLASS 2200 Advanced Copier had 2200 orders."
+            ),
+            ResultTable(
+                columns=["product_name"],
+                rows=[["Canon imageCLASS 2200 Advanced Copier"]],
+            ),
+        )
+
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+    assert "'2200'" in raised.value.message
+    assert "normalized=2200" in raised.value.message
+
+
+def test_arbitrary_number_outside_exact_returned_text_is_rejected() -> None:
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(answer="The product achieved 9999 sales."),
+            ResultTable(
+                columns=["product_name"],
+                rows=[["Canon imageCLASS 2200 Advanced Copier"]],
+            ),
+        )
+
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+    assert "'9999'" in raised.value.message
+
+
+def test_unreturned_text_with_embedded_number_is_rejected() -> None:
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(answer="Product XYZ 3000 had the highest sales."),
+            ResultTable(
+                columns=["product_name"],
+                rows=[["Canon imageCLASS 2200 Advanced Copier"]],
+            ),
+        )
+
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+    assert "'3000'" in raised.value.message
+
+
+def test_pure_numeric_result_string_uses_numeric_grounding() -> None:
+    validate_answer_output(
+        AnswerOutput(answer="There were 2,200 orders."),
+        ResultTable(columns=["order_count"], rows=[["2200"]]),
+    )
+
+
+def test_exact_arabic_text_grounds_its_embedded_digit_occurrence() -> None:
+    validate_answer_output(
+        AnswerOutput(answer="طابعة كانون ٢٢٠٠ المتقدمة حققت أعلى المبيعات."),
+        ResultTable(columns=["product_name"], rows=[["طابعة كانون ٢٢٠٠ المتقدمة"]]),
+    )
+
+
+@pytest.mark.parametrize("returned_value", [10, "10"])
 @pytest.mark.parametrize("percentage", ["10%", "\u0661\u0660\u066a"])
-def test_numeric_result_does_not_ground_percentage_token(percentage: str) -> None:
+def test_numeric_result_does_not_ground_percentage_token(
+    returned_value: object, percentage: str
+) -> None:
     with pytest.raises(Prompt2InsightError) as raised:
         validate_answer_output(
             AnswerOutput(answer=f"Revenue increased by {percentage}."),
-            ResultTable(columns=["revenue"], rows=[[10]]),
+            ResultTable(columns=["revenue"], rows=[[returned_value]]),
         )
 
     assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
