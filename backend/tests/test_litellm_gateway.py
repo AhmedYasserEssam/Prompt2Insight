@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 from app.core.config import Settings
 from app.core.errors import ErrorCode, Prompt2InsightError
@@ -57,7 +58,23 @@ def test_model_groups_bind_primary_and_fallback_to_one_output_schema() -> None:
 
     assert groups.planner.primary_model == "sql-planner-primary"
     assert groups.planner.output_type is QueryPlan
+    assert groups.answer.primary_model == "answer-primary"
+    assert groups.answer.fallback_model == "answer-fallback"
     assert groups.answer.output_type is AnswerOutput
+
+
+def test_litellm_answer_aliases_use_groq_provider_model_variables() -> None:
+    config_path = Path(__file__).parents[2] / "infra" / "litellm" / "config.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    models = {model["model_name"]: model["litellm_params"] for model in config["model_list"]}
+
+    assert models["answer-primary"]["model"] == "os.environ/LITELLM_ANSWER_PRIMARY_MODEL"
+    assert models["answer-fallback"]["model"] == "os.environ/LITELLM_ANSWER_FALLBACK_MODEL"
+    assert models["answer-primary"]["api_key"] == "os.environ/GROQ_API_KEY"
+    assert models["answer-fallback"]["api_key"] == "os.environ/GROQ_API_KEY"
+    assert config["router_settings"]["fallbacks"][-1] == {
+        "answer-primary": ["answer-fallback"]
+    }
 
 
 async def test_primary_provider_failure_retries_then_uses_fallback() -> None:
