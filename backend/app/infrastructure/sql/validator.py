@@ -179,11 +179,19 @@ class SQLValidator:
         self._enforce_limit(tree, policy.maximum_rows)
 
         return ValidatedSQL(
-            normalized_sql=tree.sql(dialect=dialect.value),
+            normalized_sql=self._normalized_sql(tree, dialect),
             referenced_tables=tables,
             referenced_columns=columns,
             join_count=len(joins),
         )
+
+    @staticmethod
+    def _normalized_sql(tree: exp.Query, dialect: SQLDialect) -> str:
+        normalized_tree = tree.copy()
+        for placeholder in normalized_tree.find_all(exp.Placeholder):
+            if placeholder.this:
+                placeholder.replace(exp.Var(this=f":{placeholder.name}"))
+        return normalized_tree.sql(dialect=dialect.value)
 
     @staticmethod
     def _table_name(table: exp.Table) -> str:

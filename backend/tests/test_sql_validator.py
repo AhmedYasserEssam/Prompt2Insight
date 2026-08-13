@@ -1,4 +1,6 @@
 import pytest
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
 
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import SQLDialect
@@ -22,6 +24,24 @@ def test_accepts_safe_select(policy: SQLPolicy) -> None:
     )
     assert "LIMIT 100" in result.normalized_sql
     assert result.referenced_tables == frozenset({"analytics.orders"})
+
+
+def test_postgres_normalization_preserves_named_sqlalchemy_bind_parameters(
+    policy: SQLPolicy,
+) -> None:
+    result = SQLValidator().validate(
+        sql=(
+            "SELECT '%(region_value)s' AS marker, region FROM analytics.orders "
+            "WHERE region = :region_value"
+        ),
+        dialect=SQLDialect.POSTGRES,
+        policy=policy,
+    )
+
+    assert ":region_value" in result.normalized_sql
+    assert "'%(region_value)s'" in result.normalized_sql
+    compiled = text(result.normalized_sql).compile(dialect=PGDialect_asyncpg())
+    assert compiled.params == {"region_value": None}
 
 
 def test_rejects_multiple_statements(policy: SQLPolicy) -> None:

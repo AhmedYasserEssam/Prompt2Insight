@@ -2,7 +2,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.errors import ErrorCode
 from app.domain.databases.models import SQLDialect
@@ -39,6 +39,16 @@ class QueryFilter(BaseModel):
     value: Any
 
 
+QueryParameterValue = str | float | bool | None
+
+
+class QueryParameter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    value: QueryParameterValue
+
+
 class QueryPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -50,8 +60,21 @@ class QueryPlan(BaseModel):
     dimension_ids: list[str] = Field(default_factory=list)
     filters: list[QueryFilter] = Field(default_factory=list)
     sql: str | None = None
-    parameters: dict[str, Any] = Field(default_factory=dict)
+    parameters: list[QueryParameter] = Field(default_factory=list)
     clarification_question: str | None = None
+
+    @field_validator("parameters")
+    @classmethod
+    def parameter_names_must_be_unique(
+        cls, parameters: list[QueryParameter]
+    ) -> list[QueryParameter]:
+        names = [parameter.name for parameter in parameters]
+        if len(names) != len(set(names)):
+            raise ValueError("Query parameter names must be unique.")
+        return parameters
+
+    def parameter_bindings(self) -> dict[str, QueryParameterValue]:
+        return {parameter.name: parameter.value for parameter in self.parameters}
 
 
 class ChartSpecification(BaseModel):

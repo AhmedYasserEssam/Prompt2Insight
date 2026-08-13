@@ -359,8 +359,10 @@ def _strict_json_schema(output_type: type[BaseModel]) -> dict[str, Any]:
 
 def _require_all_object_properties(schema: Any) -> None:
     if isinstance(schema, dict):
-        properties = schema.get("properties")
-        if isinstance(properties, dict):
+        if schema.get("type") == "object":
+            properties = schema.get("properties")
+            if not isinstance(properties, dict):
+                raise ValueError("Strict output schemas cannot contain open object maps.")
             schema["required"] = list(properties)
             schema["additionalProperties"] = False
         for value in schema.values():

@@ -63,6 +63,8 @@ class Connector(SQLDatabaseConnector):
         self.executed = False
         self.explained_sql: str | None = None
         self.executed_sql: str | None = None
+        self.explained_parameters: dict[str, object] | None = None
+        self.executed_parameters: dict[str, object] | None = None
 
     async def get_schema_snapshot(self) -> SchemaSnapshot:
         return self.current
@@ -73,11 +75,13 @@ class Connector(SQLDatabaseConnector):
     async def explain(self, query: PreparedQuery) -> ExplainResult:
         self.explained = True
         self.explained_sql = query.sql
+        self.explained_parameters = query.parameters
         return ExplainResult(raw_plan={}, estimated_rows=1, estimated_cost=1)
 
     async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
         self.executed = True
         self.executed_sql = query.sql
+        self.executed_parameters = query.parameters
         return QueryResult(
             columns=["region", "revenue"], rows=[], row_count=0, truncated=False, duration_ms=1
         )
@@ -86,7 +90,7 @@ class Connector(SQLDatabaseConnector):
         return None
 
 
-def plan(sql: str) -> QueryPlan:
+def plan(sql: str, parameters: list[dict[str, object]] | None = None) -> QueryPlan:
     return QueryPlan(
         status="ready",
         response_language="en",
@@ -95,6 +99,7 @@ def plan(sql: str) -> QueryPlan:
         metric_ids=["revenue"],
         dimension_ids=["region"],
         sql=sql,
+        parameters=parameters or [],
     )
 
 
@@ -139,6 +144,26 @@ async def test_current_schema_allows_execution() -> None:
         settings=Settings(),
     )
     assert connector.explained and connector.executed
+
+
+async def test_scalar_parameters_reach_explain_and_execution_as_bindings() -> None:
+    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+    current = snapshot()
+    connector = Connector(current)
+    filtered_sql = SAFE_SQL.replace(
+        " GROUP BY", " WHERE analytics.orders.region = :region GROUP BY"
+    )
+
+    await QueryPlanExecutor().execute(
+        plan=plan(filtered_sql, [{"name": "region", "value": "West"}]),
+        catalog=catalog,
+        schema_snapshot=current,
+        connector=connector,
+        settings=Settings(),
+    )
+
+    assert connector.explained_parameters == {"region": "West"}
+    assert connector.executed_parameters == {"region": "West"}
 
 
 @pytest.mark.parametrize(

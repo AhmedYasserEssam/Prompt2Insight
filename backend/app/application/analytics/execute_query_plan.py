@@ -63,7 +63,7 @@ class QueryPlanExecutor:
         self._validate_privacy(validated.normalized_sql, catalog, schema_snapshot.dialect, plan)
         query = PreparedQuery(
             sql=validated.normalized_sql,
-            parameters=plan.parameters,
+            parameters=plan.parameter_bindings(),
             maximum_rows=settings.max_output_rows,
             timeout_ms=settings.query_timeout_ms,
             lock_timeout_ms=settings.lock_timeout_ms,

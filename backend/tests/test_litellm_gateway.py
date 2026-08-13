@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.core.errors import ErrorCode, Prompt2InsightError
@@ -13,6 +15,7 @@ from app.infrastructure.ai.litellm_gateway import (
     LiteLLMGateway,
     ModelGroup,
     VLLMGateway,
+    _strict_json_schema,
     build_analytics_model_groups,
 )
 from app.infrastructure.catalogs.loader import load_catalog
@@ -51,6 +54,40 @@ def answer_group() -> ModelGroup[AnswerOutput]:
         fallback_model="answer-fallback",
         output_type=AnswerOutput,
     )
+
+
+def planner_group() -> ModelGroup[QueryPlan]:
+    return ModelGroup(
+        name="planner",
+        primary_model="sql-planner-primary",
+        fallback_model="sql-planner-fallback",
+        output_type=QueryPlan,
+    )
+
+
+def query_plan(parameters: list[dict[str, object]] | None = None) -> QueryPlan:
+    return QueryPlan(
+        status="ready",
+        response_language="en",
+        database_dialect=SQLDialect.POSTGRES,
+        interpretation="filtered revenue",
+        sql="SELECT 1",
+        parameters=parameters or [],
+    )
+
+
+def assert_strict_object_nodes(schema: object, path: str = "$") -> None:
+    if isinstance(schema, dict):
+        if schema.get("type") == "object":
+            properties = schema.get("properties")
+            assert isinstance(properties, dict), path
+            assert schema.get("additionalProperties") is False, path
+            assert set(schema.get("required", [])) == set(properties), path
+        for key, value in schema.items():
+            assert_strict_object_nodes(value, f"{path}/{key}")
+    elif isinstance(schema, list):
+        for index, value in enumerate(schema):
+            assert_strict_object_nodes(value, f"{path}/{index}")
 
 
 def test_model_groups_bind_primary_and_fallback_to_one_output_schema() -> None:
@@ -95,6 +132,70 @@ async def test_strict_response_schema_requires_every_object_property() -> None:
     schema = response_format["json_schema"]["schema"]
     assert schema["required"] == list(schema["properties"])
     assert schema["additionalProperties"] is False
+    assert_strict_object_nodes(schema)
+
+
+def test_query_plan_strict_schema_closes_parameters_object() -> None:
+    raw_schema = QueryPlan.model_json_schema()
+    strict_schema = _strict_json_schema(QueryPlan)
+    raw_parameters = raw_schema["properties"]["parameters"]
+    strict_parameters = strict_schema["properties"]["parameters"]
+
+    assert strict_parameters.get("type") == "array", json.dumps(
+        {"raw_parameters": raw_parameters, "strict_parameters": strict_parameters},
+        indent=2,
+    )
+    assert strict_parameters["items"] == {"$ref": "#/$defs/QueryParameter"}
+    parameter_value_schema = strict_schema["$defs"]["QueryParameter"]["properties"]["value"]
+    parameter_value_types = {item["type"] for item in parameter_value_schema["anyOf"]}
+    assert not {"integer", "number"} <= parameter_value_types
+    assert_strict_object_nodes(strict_schema)
+
+
+def test_query_plan_without_parameters_produces_empty_bindings() -> None:
+    assert query_plan().parameter_bindings() == {}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("West", "West"), (42, 42.0), (3.5, 3.5), (True, True), (None, None)],
+)
+def test_query_plan_scalar_parameter_survives_binding(
+    value: object, expected: object
+) -> None:
+    plan = query_plan([{"name": "filter_value", "value": value}])
+
+    assert plan.parameter_bindings() == {"filter_value": expected}
+
+
+@pytest.mark.parametrize("value", [{"nested": "value"}, ["nested"]])
+def test_query_plan_rejects_nested_parameter_values(value: object) -> None:
+    with pytest.raises(ValidationError) as raised:
+        query_plan([{"name": "filter_value", "value": value}])
+
+    assert "parameters.0.value" in str(raised.value)
+
+
+async def test_planner_primary_failure_uses_fallback_with_strict_query_plan_schema() -> None:
+    plan_json = query_plan().model_dump_json()
+    gateway, completions = gateway_with(
+        [RuntimeError("primary unavailable"), RuntimeError("still unavailable"), plan_json]
+    )
+
+    result = await gateway.generate(
+        model_group=planner_group(), system_prompt="system", user_prompt="question"
+    )
+
+    assert [call["model"] for call in completions.calls] == [
+        "sql-planner-primary",
+        "sql-planner-primary",
+        "sql-planner-fallback",
+    ]
+    for call in completions.calls:
+        schema = call["response_format"]["json_schema"]["schema"]
+        assert_strict_object_nodes(schema)
+    assert result.output.parameter_bindings() == {}
+    assert result.metadata.fallback_used is True
 
 
 async def test_primary_provider_failure_retries_then_uses_fallback() -> None:
@@ -168,7 +269,7 @@ async def test_qwen_planner_uses_catalog_context_and_explicit_dialect(
     plan = (
         '{"status":"ready","response_language":"ar","database_dialect":"'
         f'{dialect.value}","interpretation":"revenue by month","metric_ids":["revenue"],'
-        '"dimension_ids":["order_month"],"filters":[],"sql":null,"parameters":{},'
+        '"dimension_ids":["order_month"],"filters":[],"sql":null,"parameters":[],'
         '"clarification_question":null}'
     )
     gateway, completions = gateway_with([plan])
