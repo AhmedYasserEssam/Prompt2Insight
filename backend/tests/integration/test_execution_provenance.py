@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import AsyncIterator
 from hashlib import sha256
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.analytics.run_analytics_request import PlanningContext
+from app.application.databases.configure_catalog import CatalogConfigurationService
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import (
     AnalyticsRequest,
@@ -17,7 +19,13 @@ from app.domain.analytics.models import (
     QueryPlan,
     ResultTable,
 )
-from app.domain.databases.models import DatabaseCapabilities, SchemaSnapshot, SQLDialect
+from app.domain.databases.models import (
+    ColumnMetadata,
+    DatabaseCapabilities,
+    SchemaSnapshot,
+    SQLDialect,
+    TableMetadata,
+)
 from app.infrastructure.catalogs.models import AnalyticsCatalog
 from app.persistence.models import (
     AnalyticalRequestRecord,
@@ -27,7 +35,7 @@ from app.persistence.models import (
     QueryExecutionRecord,
     SchemaSnapshotRecord,
 )
-from app.persistence.repositories import AnalyticsRequestRepository
+from app.persistence.repositories import AnalyticsRequestRepository, ConnectionProfileRepository
 
 pytestmark = pytest.mark.skipif(
     os.getenv("P2I_RUN_PERSISTENCE_INTEGRATION") != "1",
@@ -54,7 +62,7 @@ async def _parents(repository: AnalyticsRequestRepository) -> tuple[PlanningCont
     profile_id, conversation_id, catalog_id, snapshot_id = uuid4(), uuid4(), uuid4(), uuid4()
     snapshot = SchemaSnapshot(
         dialect=SQLDialect.POSTGRES,
-        database_name="analytics",
+        database_name=str(profile_id),
         server_version="16",
         tables=[],
         capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
@@ -83,6 +91,15 @@ async def _parents(repository: AnalyticsRequestRepository) -> tuple[PlanningCont
             )
         )
         await session.flush()
+        session.add(
+            SchemaSnapshotRecord(
+                id=snapshot_id,
+                connection_profile_id=profile_id,
+                content_hash=sha256(str(snapshot_id).encode()).hexdigest(),
+                snapshot=snapshot.model_dump(mode="json"),
+            )
+        )
+        await session.flush()
         session.add(ConversationRecord(id=conversation_id, connection_profile_id=profile_id))
         session.add(
             CatalogRevisionRecord(
@@ -91,14 +108,6 @@ async def _parents(repository: AnalyticsRequestRepository) -> tuple[PlanningCont
                 schema_snapshot_id=snapshot_id,
                 content_hash=sha256(str(catalog_id).encode()).hexdigest(),
                 content=catalog.model_dump(mode="json"),
-            )
-        )
-        session.add(
-            SchemaSnapshotRecord(
-                id=snapshot_id,
-                connection_profile_id=profile_id,
-                content_hash=sha256(str(snapshot_id).encode()).hexdigest(),
-                snapshot=snapshot.model_dump(mode="json"),
             )
         )
         await session.commit()
@@ -261,3 +270,129 @@ async def test_sql_hash_changes_with_validated_sql(repository: AnalyticsRequestR
         assert execution.sql_hash == sha256(sql.encode()).hexdigest()
     assert hashes[0] == hashes[1]
     assert hashes[1] != hashes[2]
+
+
+async def test_published_catalog_persists_and_reloads_canonical_references(
+    repository: AnalyticsRequestRepository,
+) -> None:
+    profile_id, conversation_id, snapshot_id = uuid4(), uuid4(), uuid4()
+    snapshot = SchemaSnapshot(
+        dialect=SQLDialect.POSTGRES,
+        database_name=str(profile_id),
+        server_version="16",
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
+        tables=[
+            TableMetadata(
+                schema_name="analytics",
+                table_name="sales",
+                table_type="table",
+                columns=[
+                    ColumnMetadata(name=name, data_type="text", nullable=False)
+                    for name in (
+                        "sales", "order_id", "order_date", "customer_id", "customer_name",
+                        "postal_code", "category", "region",
+                    )
+                ],
+            )
+        ],
+    )
+    draft = AnalyticsCatalog.model_validate(
+        {
+            "catalog_version": "test",
+            "metrics": {
+                "revenue": {
+                    "labels": {"en": "Revenue", "ar": "Revenue"},
+                    "aliases": {"en": [], "ar": []},
+                    "descriptions": {"en": "", "ar": ""},
+                    "expressions": {
+                        "postgres": "SUM(sales.sales)",
+                        "mysql": "SUM(sales.sales)",
+                    },
+                    "allowed_dimensions": ["month"],
+                }
+            },
+            "dimensions": {
+                "month": {
+                    "labels": {"en": "Month", "ar": "Month"},
+                    "aliases": {"en": [], "ar": []},
+                    "descriptions": {"en": "", "ar": ""},
+                    "expressions": {
+                        "postgres": "DATE_TRUNC('month', sales.order_date)",
+                        "mysql": "DATE_TRUNC('month', sales.order_date)",
+                    },
+                }
+            },
+            "join_contracts": [],
+            "column_policies": {
+                "sales.customer_id": "sensitive",
+                "sales.customer_name": "sensitive",
+                "sales.postal_code": "sensitive",
+            },
+            "privacy": {"privacy_unit": "sales.customer_id", "minimum_group_size": 1},
+        }
+    )
+    factory = repository._session_factory
+    async with factory() as session:
+        session.add(
+            ConnectionProfileRecord(
+                id=profile_id,
+                name=str(profile_id),
+                dialect="postgres",
+                host="db",
+                port=5432,
+                database_name="analytics",
+                username="analytics",
+                credential_reference="P2I_TEST_DB_URL",
+            )
+        )
+        session.add(ConversationRecord(id=conversation_id, connection_profile_id=profile_id))
+        session.add(
+            SchemaSnapshotRecord(
+                id=snapshot_id,
+                connection_profile_id=profile_id,
+                content_hash=snapshot.fingerprint(),
+                snapshot=snapshot.model_dump(mode="json"),
+            )
+        )
+        await session.commit()
+
+    configuration = CatalogConfigurationService(ConnectionProfileRepository(factory))
+    published = await configuration.publish(profile_id, draft)
+    canonical = published.catalog
+    assert canonical is not None
+    equivalent = canonical.model_copy(deep=True)
+    await configuration.publish(profile_id, equivalent)
+
+    async with factory() as session:
+        records = list(
+            (
+                await session.scalars(
+                    select(CatalogRevisionRecord).where(
+                        CatalogRevisionRecord.connection_profile_id == profile_id
+                    )
+                )
+            ).all()
+        )
+    assert len(records) == 1
+    record = records[0]
+    content = record.content
+    assert content["metrics"]["revenue"]["expressions"]["postgres"] == (  # type: ignore[index]
+        "SUM(analytics.sales.sales)"
+    )
+    assert content["dimensions"]["month"]["expressions"]["postgres"] == (  # type: ignore[index]
+        "DATE_TRUNC('MONTH', analytics.sales.order_date)"
+    )
+    assert set(content["column_policies"]) == {  # type: ignore[arg-type]
+        "analytics.sales.customer_id",
+        "analytics.sales.customer_name",
+        "analytics.sales.postal_code",
+    }
+    assert content["privacy"]["privacy_unit"] == "analytics.sales.customer_id"  # type: ignore[index]
+    assert record.content_hash == sha256(
+        json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    context = await repository.get_planning_context(conversation_id)
+    assert context.catalog.metric_expression("revenue", SQLDialect.POSTGRES) == (
+        "SUM(analytics.sales.sales)"
+    )

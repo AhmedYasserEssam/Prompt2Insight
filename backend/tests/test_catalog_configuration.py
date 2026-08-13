@@ -1,3 +1,5 @@
+import json
+from hashlib import sha256
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -9,7 +11,7 @@ from app.domain.databases.models import (
     SQLDialect,
     TableMetadata,
 )
-from app.infrastructure.catalogs.models import AnalyticsCatalog
+from app.infrastructure.catalogs.models import AnalyticsCatalog, ColumnClassification
 
 
 def catalog() -> AnalyticsCatalog:
@@ -157,6 +159,11 @@ async def test_unqualified_catalog_references_publish_as_schema_qualified() -> N
     assert status.catalog.metrics["total_revenue"].expressions.postgres == (
         "SUM(analytics.orders.amount)"
     )
+    assert status.catalog.join_contracts[0].left == "analytics.orders.customer_id"
+    assert status.catalog.join_contracts[0].right == "analytics.customers.id"
+    assert status.catalog.column_policies == {
+        "analytics.customers.email": ColumnClassification.SENSITIVE
+    }
     assert status.catalog.privacy.privacy_unit == "analytics.orders.customer_id"
 
 
@@ -185,15 +192,54 @@ async def test_sales_reference_is_canonicalized_only_when_schema_is_unique() -> 
             schema_name="analytics", table_name="sales", table_type="table", columns=[
                 ColumnMetadata(name="sales", data_type="numeric", nullable=False),
                 ColumnMetadata(name="order_date", data_type="date", nullable=False),
+                ColumnMetadata(name="order_id", data_type="integer", nullable=False),
                 ColumnMetadata(name="customer_id", data_type="integer", nullable=False),
+                ColumnMetadata(name="customer_name", data_type="text", nullable=False),
+                ColumnMetadata(name="postal_code", data_type="text", nullable=False),
+                ColumnMetadata(name="category", data_type="text", nullable=False),
+                ColumnMetadata(name="region", data_type="text", nullable=False),
             ]
         )
     ]
     configured = catalog()
     configured.metrics["total_revenue"].expressions.postgres = "SUM(sales.sales)"
-    configured.dimensions["order_month"].expressions.postgres = "sales.order_date"
-    configured.join_contracts = []
-    configured.column_policies = {}
+    configured.metrics["total_revenue"].expressions.mysql = "SUM(sales.sales)"
+    configured.metrics["order_count"] = configured.metrics["total_revenue"].model_copy(
+        deep=True
+    )
+    configured.metrics["order_count"].expressions.postgres = "COUNT(DISTINCT sales.order_id)"
+    configured.metrics["order_count"].expressions.mysql = "COUNT(DISTINCT sales.order_id)"
+    configured.metrics["customer_count"] = configured.metrics["total_revenue"].model_copy(
+        deep=True
+    )
+    configured.metrics["customer_count"].expressions.postgres = (
+        "COUNT(DISTINCT sales.customer_id)"
+    )
+    configured.metrics["customer_count"].expressions.mysql = (
+        "COUNT(DISTINCT sales.customer_id)"
+    )
+    configured.dimensions["order_month"].expressions.postgres = (
+        "DATE_TRUNC('month', sales.order_date)"
+    )
+    configured.dimensions["order_month"].expressions.mysql = (
+        "DATE_TRUNC('month', sales.order_date)"
+    )
+    configured.dimensions["category"] = configured.dimensions["order_month"].model_copy(deep=True)
+    configured.dimensions["category"].expressions.postgres = "sales.category"
+    configured.dimensions["category"].expressions.mysql = "sales.category"
+    configured.dimensions["region"] = configured.dimensions["order_month"].model_copy(deep=True)
+    configured.dimensions["region"].expressions.postgres = "sales.region"
+    configured.dimensions["region"].expressions.mysql = "sales.region"
+    configured.join_contracts = [
+        configured.join_contracts[0].model_copy(
+            update={"left": "sales.customer_id", "right": "sales.customer_id"}
+        )
+    ]
+    configured.column_policies = {
+        "sales.customer_id": ColumnClassification.SENSITIVE,
+        "sales.customer_name": ColumnClassification.SENSITIVE,
+        "sales.postal_code": ColumnClassification.SENSITIVE,
+    }
     configured.privacy.privacy_unit = "sales.customer_id"
     service = CatalogConfigurationService(repository)  # type: ignore[arg-type]
 
@@ -203,6 +249,57 @@ async def test_sales_reference_is_canonicalized_only_when_schema_is_unique() -> 
     assert status.catalog.metrics["total_revenue"].expressions.postgres == (
         "SUM(analytics.sales.sales)"
     )
+    assert status.catalog.metrics["total_revenue"].expressions.mysql == "SUM(analytics.sales.sales)"
+    assert status.catalog.metrics["order_count"].expressions.postgres == (
+        "COUNT(DISTINCT analytics.sales.order_id)"
+    )
+    assert status.catalog.metrics["customer_count"].expressions.postgres == (
+        "COUNT(DISTINCT analytics.sales.customer_id)"
+    )
+    assert status.catalog.dimensions["order_month"].expressions.postgres == (
+        "DATE_TRUNC('MONTH', analytics.sales.order_date)"
+    )
+    assert status.catalog.dimensions["category"].expressions.postgres == "analytics.sales.category"
+    assert status.catalog.dimensions["region"].expressions.postgres == "analytics.sales.region"
+    assert status.catalog.join_contracts[0].left == "analytics.sales.customer_id"
+    assert status.catalog.join_contracts[0].right == "analytics.sales.customer_id"
+    assert status.catalog.column_policies == {
+        "analytics.sales.customer_id": "sensitive",
+        "analytics.sales.customer_name": "sensitive",
+        "analytics.sales.postal_code": "sensitive",
+    }
+    assert status.catalog.privacy.privacy_unit == "analytics.sales.customer_id"
+
+
+async def test_equivalent_drafts_publish_the_same_canonical_content_hash() -> None:
+    repository = RepositoryStub()
+    repository.snapshot.tables[0].schema_name = "analytics"
+    repository.snapshot.tables[1].schema_name = "analytics"
+    service = CatalogConfigurationService(repository)  # type: ignore[arg-type]
+    unqualified, qualified = catalog(), catalog()
+    qualified.metrics["total_revenue"].expressions.postgres = "SUM(analytics.orders.amount)"
+    qualified.metrics["total_revenue"].expressions.mysql = "SUM(analytics.orders.amount)"
+    qualified.dimensions["order_month"].expressions.postgres = "analytics.orders.order_date"
+    qualified.dimensions["order_month"].expressions.mysql = "analytics.orders.order_date"
+    qualified.join_contracts[0].left = "analytics.orders.customer_id"
+    qualified.join_contracts[0].right = "analytics.customers.id"
+    qualified.column_policies = {"analytics.customers.email": ColumnClassification.SENSITIVE}
+    qualified.privacy.privacy_unit = "analytics.orders.customer_id"
+
+    first = await service.publish(uuid4(), unqualified)
+    second = await service.publish(uuid4(), qualified)
+
+    assert first.catalog is not None and second.catalog is not None
+    first_content = first.catalog.model_dump(mode="json")
+    second_content = second.catalog.model_dump(mode="json")
+    assert first_content == second_content
+    first_hash = sha256(
+        json.dumps(first_content, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    second_hash = sha256(
+        json.dumps(second_content, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert first_hash == second_hash
 
 
 async def test_mysql_unqualified_table_remains_canonical_when_snapshot_has_no_schema() -> None:

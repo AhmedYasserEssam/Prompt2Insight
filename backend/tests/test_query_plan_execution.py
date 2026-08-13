@@ -160,6 +160,14 @@ def test_schema_qualified_sources_are_exact_and_ctes_are_excluded() -> None:
         assert captured.value.code is ErrorCode.UNAUTHORIZED_TABLE
 
 
+def test_policy_intersects_canonical_catalog_and_snapshot_tables() -> None:
+    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+
+    policy = QueryPlanExecutor._policy(catalog, snapshot(), Settings())
+
+    assert policy.allowed_tables == frozenset({"analytics.orders", "analytics.order_items"})
+
+
 @pytest.mark.parametrize(
     ("mutate", "code"),
     [

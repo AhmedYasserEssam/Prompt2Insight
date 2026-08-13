@@ -5,7 +5,7 @@ from sqlglot.errors import ParseError
 
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.connection_profiles import CatalogStatus, CatalogValidationResult
-from app.domain.databases.models import SchemaSnapshot
+from app.domain.databases.models import SchemaSnapshot, SQLDialect
 from app.infrastructure.catalogs.models import AnalyticsCatalog, ColumnClassification
 from app.persistence.models import SchemaSnapshotRecord
 from app.persistence.repositories import ConnectionProfileRepository
@@ -79,44 +79,68 @@ class CatalogConfigurationService:
             table_schemas[table.table_name].append(table.schema_name)
         errors: list[str] = []
 
-        def canonicalize(value: str, label: str) -> str:
+        def canonicalize(
+            value: str, label: str, dialect: SQLDialect, report_errors: bool
+        ) -> str:
             try:
-                tree = parse_one(value, read=snapshot.dialect.value)
+                tree = parse_one(value, read=dialect.value)
             except ParseError:
-                errors.append(f"{label}: expression cannot be parsed for {snapshot.dialect.value}.")
+                if report_errors:
+                    errors.append(
+                        f"{label}: expression cannot be parsed for {dialect.value}."
+                    )
                 return value
+            expression_errors: list[str] = []
             for table in tree.find_all(exp.Table):
-                CatalogConfigurationService._qualify_table(table, table_schemas, errors, label)
+                CatalogConfigurationService._qualify_table(
+                    table, table_schemas, expression_errors, label
+                )
             for column in tree.find_all(exp.Column):
                 if column.table:
                     CatalogConfigurationService._qualify_column(
-                        column, table_schemas, errors, label
+                        column, table_schemas, expression_errors, label
                     )
-            return tree.sql(dialect=snapshot.dialect.value)
+            if report_errors:
+                errors.extend(expression_errors)
+            return tree.sql(dialect=dialect.value)
 
         for metric_id, metric in canonical.metrics.items():
             expressions = metric.expressions
-            selected = expressions.for_dialect(snapshot.dialect)
-            if snapshot.dialect.value == "postgres":
-                expressions.postgres = canonicalize(selected, f'Metric "{metric_id}"')
-            else:
-                expressions.mysql = canonicalize(selected, f'Metric "{metric_id}"')
+            expressions.postgres = canonicalize(
+                expressions.postgres,
+                f'Metric "{metric_id}"',
+                SQLDialect.POSTGRES,
+                snapshot.dialect is SQLDialect.POSTGRES,
+            )
+            expressions.mysql = canonicalize(
+                expressions.mysql,
+                f'Metric "{metric_id}"',
+                SQLDialect.MYSQL,
+                snapshot.dialect is SQLDialect.MYSQL,
+            )
         for dimension_id, dimension in canonical.dimensions.items():
             expressions = dimension.expressions
-            selected = expressions.for_dialect(snapshot.dialect)
-            if snapshot.dialect.value == "postgres":
-                expressions.postgres = canonicalize(selected, f'Dimension "{dimension_id}"')
-            else:
-                expressions.mysql = canonicalize(selected, f'Dimension "{dimension_id}"')
+            expressions.postgres = canonicalize(
+                expressions.postgres,
+                f'Dimension "{dimension_id}"',
+                SQLDialect.POSTGRES,
+                snapshot.dialect is SQLDialect.POSTGRES,
+            )
+            expressions.mysql = canonicalize(
+                expressions.mysql,
+                f'Dimension "{dimension_id}"',
+                SQLDialect.MYSQL,
+                snapshot.dialect is SQLDialect.MYSQL,
+            )
         for join in canonical.join_contracts:
-            join.left = canonicalize(join.left, "Join left key")
-            join.right = canonicalize(join.right, "Join right key")
+            join.left = canonicalize(join.left, "Join left key", snapshot.dialect, True)
+            join.right = canonicalize(join.right, "Join right key", snapshot.dialect, True)
         canonical.column_policies = {
-            canonicalize(column, "Column policy"): classification
+            canonicalize(column, "Column policy", snapshot.dialect, True): classification
             for column, classification in canonical.column_policies.items()
         }
         canonical.privacy.privacy_unit = canonicalize(
-            canonical.privacy.privacy_unit, "Privacy unit"
+            canonical.privacy.privacy_unit, "Privacy unit", snapshot.dialect, True
         )
         errors.extend(CatalogConfigurationService._validate_catalog(canonical, snapshot))
         return canonical, errors
