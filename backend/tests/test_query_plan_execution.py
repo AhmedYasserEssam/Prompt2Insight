@@ -19,6 +19,7 @@ from app.domain.databases.models import (
     TableMetadata,
 )
 from app.infrastructure.catalogs.loader import load_catalog
+from app.infrastructure.catalogs.models import AnalyticsCatalog
 from app.infrastructure.sql.validator import SQLValidator
 
 
@@ -166,6 +167,120 @@ def test_policy_intersects_canonical_catalog_and_snapshot_tables() -> None:
     policy = QueryPlanExecutor._policy(catalog, snapshot(), Settings())
 
     assert policy.allowed_tables == frozenset({"analytics.orders", "analytics.order_items"})
+
+
+def test_catalog_tables_preserve_unqualified_column_references() -> None:
+    catalog = AnalyticsCatalog.model_validate(
+        {
+            "catalog_version": "test",
+            "metrics": {},
+            "dimensions": {},
+            "join_contracts": [],
+            "column_policies": {"sales.sales": "non_sensitive"},
+            "privacy": {"privacy_unit": "sales.customer_id", "minimum_group_size": 1},
+        }
+    )
+
+    assert QueryPlanExecutor._catalog_tables(catalog, SQLDialect.POSTGRES) == {"sales"}
+
+
+def test_catalog_tables_preserve_schema_qualified_column_references() -> None:
+    catalog = AnalyticsCatalog.model_validate(
+        {
+            "catalog_version": "test",
+            "metrics": {},
+            "dimensions": {},
+            "join_contracts": [],
+            "column_policies": {"analytics.sales.sales": "non_sensitive"},
+            "privacy": {"privacy_unit": "analytics.sales.customer_id", "minimum_group_size": 1},
+        }
+    )
+
+    assert QueryPlanExecutor._catalog_tables(catalog, SQLDialect.POSTGRES) == {
+        "analytics.sales"
+    }
+
+
+def test_policy_allows_exact_schema_qualified_postgres_catalog_table() -> None:
+    catalog = AnalyticsCatalog.model_validate(
+        {
+            "catalog_version": "test",
+            "metrics": {
+                "sales": {
+                    "labels": {"en": "Sales", "ar": "Sales"},
+                    "aliases": {"en": [], "ar": []},
+                    "descriptions": {"en": "", "ar": ""},
+                    "expressions": {
+                        "postgres": "SUM(analytics.sales.sales)",
+                        "mysql": "SUM(sales.sales)",
+                    },
+                    "allowed_dimensions": [],
+                }
+            },
+            "dimensions": {},
+            "join_contracts": [],
+            "column_policies": {"analytics.sales.customer_id": "sensitive"},
+            "privacy": {
+                "privacy_unit": "analytics.sales.customer_id",
+                "minimum_group_size": 1,
+            },
+        }
+    )
+    sales_snapshot = SchemaSnapshot(
+        dialect=SQLDialect.POSTGRES,
+        database_name="analytics",
+        server_version="16",
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
+        tables=[
+            TableMetadata(
+                schema_name="analytics",
+                table_name="sales",
+                table_type="table",
+                columns=[
+                    ColumnMetadata(name="sales", data_type="numeric", nullable=False),
+                    ColumnMetadata(name="customer_id", data_type="integer", nullable=False),
+                ],
+            )
+        ],
+    )
+
+    policy = QueryPlanExecutor._policy(catalog, sales_snapshot, Settings())
+
+    assert policy.allowed_tables == frozenset({"analytics.sales"})
+
+
+def test_policy_allows_exact_unqualified_mysql_catalog_table() -> None:
+    catalog = AnalyticsCatalog.model_validate(
+        {
+            "catalog_version": "test",
+            "metrics": {},
+            "dimensions": {},
+            "join_contracts": [],
+            "column_policies": {"sales.amount": "non_sensitive"},
+            "privacy": {"privacy_unit": "sales.id", "minimum_group_size": 1},
+        }
+    )
+    sales_snapshot = SchemaSnapshot(
+        dialect=SQLDialect.MYSQL,
+        database_name="analytics",
+        server_version="8",
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.MYSQL, server_version="8"),
+        tables=[
+            TableMetadata(
+                schema_name=None,
+                table_name="sales",
+                table_type="table",
+                columns=[
+                    ColumnMetadata(name="amount", data_type="numeric", nullable=False),
+                    ColumnMetadata(name="id", data_type="integer", nullable=False),
+                ],
+            )
+        ],
+    )
+
+    policy = QueryPlanExecutor._policy(catalog, sales_snapshot, Settings())
+
+    assert policy.allowed_tables == frozenset({"sales"})
 
 
 @pytest.mark.parametrize(

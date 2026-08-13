@@ -122,11 +122,11 @@ class QueryPlanExecutor:
                 ".".join(item for item in (table.catalog, table.db, table.name) if item)
                 for table in tree.find_all(exp.Table)
             )
-            result.update(
-                f"{column.db}.{column.table}"
-                for column in tree.find_all(exp.Column)
-                if column.db and column.table
-            )
+            for column in tree.find_all(exp.Column):
+                if column.db and column.table:
+                    result.add(f"{column.db}.{column.table}")
+                elif column.table:
+                    result.add(column.table)
         return result
 
     @staticmethod
