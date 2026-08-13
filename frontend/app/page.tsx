@@ -1,4 +1,4 @@
-import {AnalyticsChat} from "@/components/analytics-chat";
+import {ConnectionWorkspace} from "@/components/connection-workspace";
 
 export default function Home() {
   return (
@@ -7,7 +7,7 @@ export default function Home() {
         <h1>Prompt2Insight</h1>
         <p>Ask enterprise-data questions in English or Arabic.</p>
       </header>
-      <AnalyticsChat />
+      <ConnectionWorkspace />
     </main>
   );
 }

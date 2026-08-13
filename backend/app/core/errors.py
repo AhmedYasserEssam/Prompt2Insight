@@ -3,6 +3,9 @@ from enum import StrEnum
 
 class ErrorCode(StrEnum):
     NOT_CONFIGURED = "not_configured"
+    AUTHENTICATION_FAILED = "authentication_failed"
+    SCHEMA_INTROSPECTION_FAILED = "schema_introspection_failed"
+    CATALOG_NOT_READY = "catalog_not_ready"
     LLM_UNAVAILABLE = "llm_unavailable"
     LLM_INVALID_OUTPUT = "llm_invalid_output"
     QUESTION_AMBIGUOUS = "question_ambiguous"

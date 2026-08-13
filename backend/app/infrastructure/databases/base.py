@@ -106,6 +106,18 @@ class SQLAlchemyConnectorBase(SQLDatabaseConnector):
         if any(
             marker in message
             for marker in (
+                "password authentication failed",
+                "authentication failed",
+                "access denied",
+            )
+        ):
+            return Prompt2InsightError(
+                ErrorCode.AUTHENTICATION_FAILED,
+                "Could not authenticate with the supplied credentials.",
+            )
+        if any(
+            marker in message
+            for marker in (
                 "statement timeout",
                 "maximum statement execution time exceeded",
                 "max_execution_time",

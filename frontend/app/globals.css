@@ -17,7 +17,7 @@ body {
   font-family: Arial, "Noto Sans Arabic", sans-serif;
 }
 
-button, textarea, select { font: inherit; }
+button, textarea, select, input { font: inherit; }
 main { width: min(960px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
 .stack { display: grid; gap: 16px; }
@@ -27,5 +27,8 @@ button { border: 0; border-radius: 10px; background: var(--accent); color: white
 button:disabled { opacity: .6; cursor: wait; }
 label { color: var(--muted); }
 select { border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: white; }
+input { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-top: 4px; background: white; }
+.secondary { background: #e9edf5; color: var(--text); }
+small { color: var(--muted); }
 pre, code { direction: ltr; text-align: left; }
 .error { color: var(--danger); }

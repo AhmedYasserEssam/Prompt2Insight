@@ -2,11 +2,13 @@ from functools import lru_cache
 
 from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.application.analytics.run_analytics_request import AnalyticsRequestService
+from app.application.databases.configure_catalog import CatalogConfigurationService
+from app.application.databases.setup_connection import ConnectionSetupService
 from app.core.config import get_settings
 from app.infrastructure.ai.litellm_gateway import LiteLLMGateway, build_analytics_model_groups
 from app.infrastructure.databases.resolver import EnvironmentConnectorResolver
 from app.persistence.database import create_session_factory
-from app.persistence.repositories import AnalyticsRequestRepository
+from app.persistence.repositories import AnalyticsRequestRepository, ConnectionProfileRepository
 
 
 @lru_cache
@@ -23,3 +25,17 @@ def get_analytics_request_service() -> AnalyticsRequestService:
         connector_resolver=EnvironmentConnectorResolver(),
         settings=settings,
     )
+
+
+@lru_cache
+def get_connection_setup_service() -> ConnectionSetupService:
+    settings = get_settings()
+    repository = ConnectionProfileRepository(create_session_factory(settings.app_database_url))
+    return ConnectionSetupService(repository)
+
+
+@lru_cache
+def get_catalog_configuration_service() -> CatalogConfigurationService:
+    settings = get_settings()
+    repository = ConnectionProfileRepository(create_session_factory(settings.app_database_url))
+    return CatalogConfigurationService(repository)

@@ -7,9 +7,7 @@ import {
   ResponseLanguage,
 } from "@/lib/api";
 
-const conversationId = "00000000-0000-4000-8000-000000000001";
-
-export function AnalyticsChat() {
+export function AnalyticsChat({conversationId}: {conversationId: string}) {
   const [question, setQuestion] = useState("");
   const [responseLanguage, setResponseLanguage] =
     useState<ResponseLanguage>("auto");
