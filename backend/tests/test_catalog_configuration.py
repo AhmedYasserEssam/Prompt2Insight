@@ -71,6 +71,7 @@ class RepositoryStub:
         )
         self.published: AnalyticsCatalog | None = None
         self.published_snapshot_id: UUID | None = None
+        self.publish_calls = 0
         self.snapshot_id = uuid4()
 
     async def get_schema_snapshot(self, _: UUID) -> SchemaSnapshot:
@@ -87,6 +88,7 @@ class RepositoryStub:
     async def publish_catalog(
         self, _: UUID, catalog: AnalyticsCatalog, schema_snapshot_id: UUID
     ) -> str:
+        self.publish_calls += 1
         self.published = catalog
         self.published_snapshot_id = schema_snapshot_id
         return "a" * 64
@@ -102,6 +104,19 @@ async def test_valid_catalog_publishes_and_becomes_ready() -> None:
     assert repository.published_snapshot_id is not None
     assert status.state == "ready"
     assert status.content_hash == "a" * 64
+
+
+async def test_status_returns_the_published_catalog_without_creating_a_revision() -> None:
+    repository = RepositoryStub()
+    service = CatalogConfigurationService(repository)  # type: ignore[arg-type]
+    profile_id = uuid4()
+
+    published = await service.publish(profile_id, catalog())
+    loaded = await service.status(profile_id)
+
+    assert repository.publish_calls == 1
+    assert loaded.catalog == published.catalog
+    assert loaded.state == "ready"
 
 
 async def test_new_schema_snapshot_marks_catalog_stale_until_republished() -> None:
