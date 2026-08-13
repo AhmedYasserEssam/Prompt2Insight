@@ -206,6 +206,8 @@ class SQLValidator:
         }
         columns: set[str] = set()
         for column in tree.find_all(exp.Column):
+            if self._is_order_projection_alias(column):
+                continue
             if column.table:
                 if column.table in cte_names:
                     # The CTE body is visited independently; its derived output is not a
@@ -227,6 +229,27 @@ class SQLValidator:
                 )
             columns.add(matches[0] if matches else self._column_name(column))
         return frozenset(columns)
+
+    @staticmethod
+    def _is_order_projection_alias(column: exp.Column) -> bool:
+        """Allow an unqualified output alias only as its SELECT block's ORDER BY key."""
+        if column.table or column.db or not isinstance(column.parent, exp.Ordered):
+            return False
+        order = column.find_ancestor(exp.Order)
+        select = column.find_ancestor(exp.Select)
+        if order is None or select is None or order.find_ancestor(exp.Select) is not select:
+            return False
+        aliases = [
+            projection.alias
+            for projection in select.expressions
+            if isinstance(projection, exp.Alias) and projection.alias == column.name
+        ]
+        if len(aliases) > 1:
+            raise Prompt2InsightError(
+                ErrorCode.UNAUTHORIZED_COLUMN,
+                f"ORDER BY alias is ambiguous: {column.name}.",
+            )
+        return len(aliases) == 1
 
     @staticmethod
     def _function_name(function: exp.Func) -> str | None:

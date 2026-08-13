@@ -271,8 +271,9 @@ def test_cte_privacy_enforcement_targets_the_grouped_sales_query_block() -> None
 async def test_sales_month_query_executes_with_enforced_privacy_suppression() -> None:
     catalog, current = sales_catalog_and_snapshot()
     candidate = plan(
-        "SELECT DATE_TRUNC('month', analytics.sales.order_date), SUM(analytics.sales.sales) "
-        "FROM analytics.sales GROUP BY DATE_TRUNC('month', analytics.sales.order_date)"
+        "SELECT DATE_TRUNC('month', analytics.sales.order_date) AS order_month, "
+        "SUM(analytics.sales.sales) AS total_sales FROM analytics.sales "
+        "GROUP BY DATE_TRUNC('month', analytics.sales.order_date) ORDER BY order_month"
     )
     connector = Connector(current)
 
@@ -285,6 +286,7 @@ async def test_sales_month_query_executes_with_enforced_privacy_suppression() ->
     )
 
     assert "COUNT(DISTINCT analytics.sales.customer_id) >= 5" in execution.validated.normalized_sql
+    assert "ORDER BY order_month" in execution.validated.normalized_sql
     assert connector.explained and connector.executed
 
 
