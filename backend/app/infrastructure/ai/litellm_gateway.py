@@ -317,7 +317,10 @@ schema context. Never invent metrics, dimensions, tables, columns, relationships
 Respect catalog definitions, approved joins, and the explicit database dialect: {dialect.value}.
 Use {dialect.value} SQL syntax only. Do not execute SQL. Return only the required structured
 result. Return needs_clarification when the request cannot safely map to the catalog, and
-unsupported when appropriate. Application security validation remains authoritative."""
+unsupported when appropriate. When a query contains metrics grouped by dimensions, honor the
+catalog privacy policy: include a HAVING predicate requiring COUNT(DISTINCT privacy_unit) to be
+at least minimum_group_size, using the exact approved privacy unit from the catalog. Backend
+privacy enforcement and application security validation remain authoritative."""
 
 
 class LiteLLMGateway(VLLMGateway):

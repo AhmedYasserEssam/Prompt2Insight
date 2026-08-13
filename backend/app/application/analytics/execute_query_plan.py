@@ -48,8 +48,9 @@ class QueryPlanExecutor:
             )
         catalog.validate_metric_dimensions(plan.metric_ids, plan.dimension_ids)
         self._validate_canonical_expressions(plan, catalog, schema_snapshot.dialect)
+        effective_sql = self._enforce_privacy(plan, catalog, schema_snapshot.dialect)
         validated = self._validator.validate(
-            sql=plan.sql,
+            sql=effective_sql,
             dialect=schema_snapshot.dialect,
             policy=self._policy(catalog, schema_snapshot, settings),
         )
@@ -135,7 +136,10 @@ class QueryPlanExecutor:
     ) -> None:
         tree = parse_one(plan.sql or "", read=dialect.value)
         expressions = {
-            QueryPlanExecutor._canonical_sql(node, tree, dialect) for node in tree.walk()
+            QueryPlanExecutor._canonical_sql(
+                node, node.find_ancestor(exp.Select) or tree, dialect
+            )
+            for node in tree.walk()
         }
         expected = [catalog.metric_expression(metric, dialect) for metric in plan.metric_ids]
         expected += [
@@ -152,9 +156,7 @@ class QueryPlanExecutor:
 
     @staticmethod
     def _canonical_sql(node: exp.Expression, query: exp.Expression, dialect: SQLDialect) -> str:
-        aliases = {
-            table.alias_or_name: (table.db, table.name) for table in query.find_all(exp.Table)
-        }
+        aliases = QueryPlanExecutor._scope_aliases(query)
         copy = node.copy()
         for column in copy.find_all(exp.Column):
             source = aliases.get(column.table)
@@ -164,26 +166,154 @@ class QueryPlanExecutor:
         return copy.sql(dialect=dialect.value)
 
     @staticmethod
+    def _scope_aliases(query: exp.Expression) -> dict[str, tuple[str, str]]:
+        return {
+            table.alias_or_name: (table.db, table.name)
+            for table in query.find_all(exp.Table)
+            if table.find_ancestor(exp.Select) is query
+        }
+
+    @staticmethod
+    def _aggregation_scope(
+        tree: exp.Expression, plan: QueryPlan, catalog: AnalyticsCatalog, dialect: SQLDialect
+    ) -> exp.Select:
+        expected = {
+            parse_one(catalog.metric_expression(metric, dialect), read=dialect.value).sql(
+                dialect=dialect.value
+            )
+            for metric in plan.metric_ids
+        }
+        expected.update(
+            parse_one(catalog.dimension_expression(dimension, dialect), read=dialect.value).sql(
+                dialect=dialect.value
+            )
+            for dimension in plan.dimension_ids
+        )
+        candidates: list[exp.Select] = []
+        for select in tree.find_all(exp.Select):
+            if select.args.get("group") is None:
+                continue
+            expressions = {
+                QueryPlanExecutor._canonical_sql(node, select, dialect)
+                for projection in select.expressions
+                for node in projection.walk()
+            }
+            if expected <= expressions:
+                candidates.append(select)
+        if len(candidates) != 1:
+            raise Prompt2InsightError(
+                ErrorCode.PRIVACY_POLICY_VIOLATION,
+                "The grouped query scope for privacy suppression is ambiguous.",
+            )
+        return candidates[0]
+
+    @staticmethod
+    def _privacy_column(
+        select: exp.Select, catalog: AnalyticsCatalog, dialect: SQLDialect
+    ) -> exp.Column:
+        unit = parse_one(catalog.privacy.privacy_unit, read=dialect.value)
+        if not isinstance(unit, exp.Column) or not unit.table:
+            raise Prompt2InsightError(
+                ErrorCode.PRIVACY_POLICY_VIOLATION, "The catalog privacy unit is invalid."
+            )
+        expected_table = ".".join(part for part in (unit.db, unit.table) if part)
+        sources = [
+            table
+            for table in select.find_all(exp.Table)
+            if table.find_ancestor(exp.Select) is select
+            and QueryPlanExecutor._snapshot_table_name(table.db, table.name) == expected_table
+        ]
+        if len(sources) != 1:
+            raise Prompt2InsightError(
+                ErrorCode.PRIVACY_POLICY_VIOLATION,
+                "The privacy unit source is unavailable or ambiguous in the grouped query.",
+            )
+        source = sources[0]
+        if source.alias:
+            return exp.column(unit.name, table=source.alias_or_name)
+        return unit.copy()
+
+    @staticmethod
+    def _privacy_predicates(
+        select: exp.Select, unit: str, dialect: SQLDialect
+    ) -> list[exp.GTE]:
+        having = select.args.get("having")
+        if not isinstance(having, exp.Having):
+            return []
+        return [
+            predicate
+            for predicate in having.find_all(exp.GTE)
+            if predicate.find_ancestor(exp.Select) is select
+            and QueryPlanExecutor._privacy_threshold(predicate, select, unit, dialect) is not None
+        ]
+
+    @staticmethod
+    def _privacy_threshold(
+        predicate: exp.GTE, select: exp.Select, unit: str, dialect: SQLDialect
+    ) -> int | None:
+        count = predicate.this
+        distinct = count.this if isinstance(count, exp.Count) else None
+        if (
+            not isinstance(distinct, exp.Distinct)
+            or len(distinct.expressions) != 1
+            or QueryPlanExecutor._canonical_sql(distinct.expressions[0], select, dialect) != unit
+            or not isinstance(predicate.expression, exp.Literal)
+        ):
+            return None
+        try:
+            return int(predicate.expression.this)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _enforce_privacy(plan: QueryPlan, catalog: AnalyticsCatalog, dialect: SQLDialect) -> str:
+        if not plan.metric_ids or not plan.dimension_ids:
+            return plan.sql or ""
+        tree = parse_one(plan.sql or "", read=dialect.value)
+        select = QueryPlanExecutor._aggregation_scope(tree, plan, catalog, dialect)
+        unit = parse_one(catalog.privacy.privacy_unit, read=dialect.value).sql(
+            dialect=dialect.value
+        )
+        if any(
+            threshold >= catalog.privacy.minimum_group_size
+            for predicate in QueryPlanExecutor._privacy_predicates(select, unit, dialect)
+            if (threshold := QueryPlanExecutor._privacy_threshold(predicate, select, unit, dialect))
+            is not None
+        ):
+            return tree.sql(dialect=dialect.value)
+        predicate = exp.GTE(
+            this=exp.Count(
+                this=exp.Distinct(
+                    expressions=[QueryPlanExecutor._privacy_column(select, catalog, dialect)]
+                )
+            ),
+            expression=exp.Literal.number(catalog.privacy.minimum_group_size),
+        )
+        having = select.args.get("having")
+        if isinstance(having, exp.Having):
+            having.set("this", exp.and_(having.this, predicate))
+        else:
+            select.set("having", exp.Having(this=predicate))
+        return tree.sql(dialect=dialect.value)
+
+    @staticmethod
     def _validate_privacy(
         sql: str, catalog: AnalyticsCatalog, dialect: SQLDialect, plan: QueryPlan
     ) -> None:
         if not plan.metric_ids or not plan.dimension_ids:
             return
         tree = parse_one(sql, read=dialect.value)
+        select = QueryPlanExecutor._aggregation_scope(tree, plan, catalog, dialect)
         unit = parse_one(catalog.privacy.privacy_unit, read=dialect.value).sql(
             dialect=dialect.value
         )
-        for predicate in tree.find_all(exp.GTE):
-            count = predicate.this
-            distinct = count.this if isinstance(count, exp.Count) else None
-            if (
-                isinstance(distinct, exp.Distinct)
-                and len(distinct.expressions) == 1
-                and QueryPlanExecutor._canonical_sql(distinct.expressions[0], tree, dialect) == unit
-                and isinstance(predicate.expression, exp.Literal)
-                and int(predicate.expression.this) >= catalog.privacy.minimum_group_size
-            ):
-                return
+        if any(
+            threshold >= catalog.privacy.minimum_group_size
+            for predicate in QueryPlanExecutor._privacy_predicates(select, unit, dialect)
+            if (threshold := QueryPlanExecutor._privacy_threshold(predicate, select, unit, dialect))
+            is not None
+        ):
+            return
         raise Prompt2InsightError(
             ErrorCode.PRIVACY_POLICY_VIOLATION, "The required minimum-group suppression is missing."
         )

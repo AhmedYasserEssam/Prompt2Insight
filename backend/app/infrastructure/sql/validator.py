@@ -230,6 +230,8 @@ class SQLValidator:
 
     @staticmethod
     def _function_name(function: exp.Func) -> str | None:
+        if isinstance(function, (exp.And, exp.Or, exp.Not)):
+            return None
         name = function.sql_name()  # type: ignore[no-untyped-call]
         return name.lower() if name else None
 
