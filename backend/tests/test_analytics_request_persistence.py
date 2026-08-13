@@ -318,6 +318,72 @@ async def test_production_request_generates_a_grounded_answer_from_executed_rows
     assert '[["Cairo",10]]' in answerer.calls[0]["user_prompt"]
 
 
+async def test_answer_grounding_detail_is_logged_but_not_exposed_in_public_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    catalog, _ = load_catalog(
+        Path(__file__).parents[2] / "catalogs" / "analytics_catalog.example.yaml"
+    )
+    snapshot = SchemaSnapshot(
+        dialect=SQLDialect.MYSQL,
+        database_name="analytics",
+        server_version="8",
+        tables=[],
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.MYSQL, server_version="8"),
+    )
+    context = PlanningContext(
+        dialect=SQLDialect.MYSQL,
+        catalog=catalog,
+        schema_snapshot=snapshot,
+        catalog_revision_id=uuid4(),
+        schema_snapshot_id=uuid4(),
+    )
+    planner = PlannerStub(
+        GenerationResult(
+            output=QueryPlan(
+                status="ready",
+                response_language="en",
+                database_dialect=SQLDialect.MYSQL,
+                interpretation="revenue by region",
+                metric_ids=["revenue"],
+                dimension_ids=["region"],
+                sql="SELECT 1",
+            ),
+            metadata=ModelExecutionMetadata(generation_stage="planner"),
+        )
+    )
+    answerer = AnswererStub(
+        GenerationResult(
+            output=AnswerOutput(answer="There are 48 monthly observations."),
+            metadata=ModelExecutionMetadata(generation_stage="answer"),
+        )
+    )
+    repository = ProductionRepository(context)
+    service = AnalyticsRequestService(
+        mock_mode=False,
+        repository=repository,
+        planning_context_store=repository,
+        planner=planner,
+        planner_model_group=ModelGroup("planner", "primary", "fallback", QueryPlan),
+        answerer=answerer,
+        answer_model_group=ModelGroup("answer", "primary", "fallback", AnswerOutput),
+        query_executor=SuccessfulExecutor(),
+        connector_resolver=ConnectorResolverStub(snapshot),
+        settings=Settings(mock_mode=False),
+    )
+
+    with caplog.at_level("WARNING"):
+        response = await service.run(
+            conversation_id=uuid4(),
+            request=AnalyticsRequest(request_id=uuid4(), question="Revenue"),
+        )
+
+    assert response.error_code is ErrorCode.LLM_INVALID_OUTPUT
+    assert response.answer is None
+    assert "ungrounded numeric value" not in response.model_dump_json()
+    assert "ungrounded numeric value: '48' (normalized=48)" in caplog.text
+
+
 async def test_execution_failure_preserves_real_planner_metadata() -> None:
     catalog, _ = load_catalog(
         Path(__file__).parents[2] / "catalogs" / "analytics_catalog.example.yaml"

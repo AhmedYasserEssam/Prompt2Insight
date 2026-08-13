@@ -41,7 +41,8 @@ def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
         if value is None or value not in result_numbers:
             raise Prompt2InsightError(
                 ErrorCode.LLM_INVALID_OUTPUT,
-                "The answer contains a numeric value that was not returned by the query.",
+                f"The answer contains an ungrounded numeric value: {match!r} "
+                f"(normalized={value!s}).",
             )
 
 
