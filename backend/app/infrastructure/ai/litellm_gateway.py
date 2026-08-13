@@ -239,7 +239,7 @@ class VLLMGateway:
                     "json_schema": {
                         "name": output_type.__name__,
                         "strict": True,
-                        "schema": output_type.model_json_schema(),
+                        "schema": _strict_json_schema(output_type),
                     },
                 },
                 temperature=0,
@@ -349,3 +349,22 @@ class LiteLLMGateway(VLLMGateway):
             api_key=settings.litellm_master_key,
             timeout_seconds=settings.litellm_timeout_seconds,
         )
+
+
+def _strict_json_schema(output_type: type[BaseModel]) -> dict[str, Any]:
+    schema = output_type.model_json_schema()
+    _require_all_object_properties(schema)
+    return schema
+
+
+def _require_all_object_properties(schema: Any) -> None:
+    if isinstance(schema, dict):
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            schema["required"] = list(properties)
+            schema["additionalProperties"] = False
+        for value in schema.values():
+            _require_all_object_properties(value)
+    elif isinstance(schema, list):
+        for value in schema:
+            _require_all_object_properties(value)

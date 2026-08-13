@@ -70,6 +70,27 @@ def test_returned_date_grounds_its_year(returned_date: object) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("returned_date", "rendered_date"),
+    [
+        ("2015-01-01", "2015-01-01"),
+        ("2015-01-01T00:00:00", "2015-01-01T00:00:00"),
+        ("2015-01-01T00:00:00", "2015-01-01"),
+        ("2015-01-01 00:00:00", "2015-01-01 00:00:00"),
+        (date(2015, 1, 1), "2015-01-01"),
+        (datetime(2015, 1, 1), "2015-01-01T00:00:00"),
+        (datetime(2015, 1, 1), "2015-01-01"),
+    ],
+)
+def test_returned_date_grounds_a_supported_complete_date_span(
+    returned_date: object, rendered_date: str
+) -> None:
+    validate_answer_output(
+        AnswerOutput(answer=f"Revenue was reported for {rendered_date}."),
+        ResultTable(columns=["order_month"], rows=[[returned_date]]),
+    )
+
+
 @pytest.mark.parametrize("ungrounded", ["48", "12", "3"])
 def test_returned_date_does_not_ground_derived_count_month_or_day(ungrounded: str) -> None:
     with pytest.raises(Prompt2InsightError) as raised:
@@ -79,6 +100,23 @@ def test_returned_date_does_not_ground_derived_count_month_or_day(ungrounded: st
         )
 
     assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+
+
+@pytest.mark.parametrize(
+    ("returned_date", "standalone_component"),
+    [("2015-01-01", "01"), ("2015-01-03", "03")],
+)
+def test_returned_date_does_not_ground_standalone_month_or_day_tokens(
+    returned_date: str, standalone_component: str
+) -> None:
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(answer=f"There were {standalone_component} products."),
+            ResultTable(columns=["order_month"], rows=[[returned_date]]),
+        )
+
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+    assert repr(standalone_component) in raised.value.message
 
 
 def test_arbitrary_result_string_does_not_ground_embedded_number() -> None:

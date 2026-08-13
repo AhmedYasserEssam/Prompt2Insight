@@ -34,12 +34,14 @@ def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
 
     result_tokens: set[_NumericToken] = set()
     result_text_values: set[str] = set()
+    result_date_values: set[str] = set()
     for row in table.rows:
         for value in row:
             if (number := _as_numeric_token(value)) is not None:
                 result_tokens.add(number)
-            if (year := _grounded_date_year(value)) is not None:
-                result_tokens.add(_NumericToken(year))
+            if (date_value := _as_grounded_date(value)) is not None:
+                result_tokens.add(_NumericToken(Decimal(date_value.year)))
+                result_date_values.update(_grounded_date_renderings(value, date_value))
             if (text_value := _as_grounded_text_value(value)) is not None:
                 result_text_values.add(text_value)
     text = "\n".join(
@@ -50,9 +52,11 @@ def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
             *([output.chart.title] if output.chart is not None else []),
         ]
     )
-    grounded_text_spans = _find_grounded_text_spans(text, result_text_values)
+    grounded_text_spans = _find_exact_spans(text, result_text_values)
+    grounded_date_spans = _find_exact_spans(text, result_date_values)
+    grounded_spans = [*grounded_text_spans, *grounded_date_spans]
     for match in _NUMBER.finditer(text):
-        if _is_within_grounded_text_span(match.span(), grounded_text_spans):
+        if _is_within_grounded_span(match.span(), grounded_spans):
             continue
         raw_token = match.group()
         token = _as_numeric_token(raw_token)
@@ -68,12 +72,12 @@ def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
 def _as_grounded_text_value(value: Any) -> str | None:
     if not isinstance(value, str) or not any(character.isalpha() for character in value):
         return None
-    if _as_numeric_token(value) is not None or _grounded_date_year(value) is not None:
+    if _as_numeric_token(value) is not None or _as_grounded_date(value) is not None:
         return None
     return value
 
 
-def _find_grounded_text_spans(text: str, values: set[str]) -> list[tuple[int, int]]:
+def _find_exact_spans(text: str, values: set[str]) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for value in values:
         start = 0
@@ -84,13 +88,13 @@ def _find_grounded_text_spans(text: str, values: set[str]) -> list[tuple[int, in
     return spans
 
 
-def _is_within_grounded_text_span(
-    token_span: tuple[int, int], grounded_text_spans: list[tuple[int, int]]
+def _is_within_grounded_span(
+    token_span: tuple[int, int], grounded_spans: list[tuple[int, int]]
 ) -> bool:
     token_start, token_end = token_span
     return any(
         grounded_start <= token_start and token_end <= grounded_end
-        for grounded_start, grounded_end in grounded_text_spans
+        for grounded_start, grounded_end in grounded_spans
     )
 
 
@@ -111,18 +115,39 @@ def _as_numeric_token(value: Any) -> _NumericToken | None:
         return None
 
 
-def _grounded_date_year(value: Any) -> Decimal | None:
+def _as_grounded_date(value: Any) -> date | datetime | None:
     if isinstance(value, datetime):
-        return Decimal(value.year)
+        return value
     if isinstance(value, date):
-        return Decimal(value.year)
+        return value
     if not isinstance(value, str):
         return None
     try:
         if _ISO_DATE.fullmatch(value):
-            return Decimal(date.fromisoformat(value).year)
+            return date.fromisoformat(value)
         if _ISO_DATETIME.fullmatch(value):
-            return Decimal(datetime.fromisoformat(value.replace("Z", "+00:00")).year)
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
     return None
+
+
+def _grounded_date_renderings(
+    source_value: Any, date_value: date | datetime
+) -> set[str]:
+    renderings = {source_value} if isinstance(source_value, str) else set()
+    if not isinstance(date_value, datetime):
+        renderings.add(date_value.isoformat())
+        return renderings
+
+    iso_datetime = date_value.isoformat()
+    renderings.update(
+        {
+            iso_datetime,
+            date_value.isoformat(sep=" "),
+            date_value.date().isoformat(),
+        }
+    )
+    if iso_datetime.endswith("+00:00"):
+        renderings.add(f"{iso_datetime[:-6]}Z")
+    return renderings

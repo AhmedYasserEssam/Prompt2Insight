@@ -84,6 +84,19 @@ def test_litellm_answer_aliases_use_groq_provider_model_variables() -> None:
     }
 
 
+async def test_strict_response_schema_requires_every_object_property() -> None:
+    gateway, completions = gateway_with(['{"answer":"Done"}'])
+
+    await gateway.generate(
+        model_group=answer_group(), system_prompt="system", user_prompt="question"
+    )
+
+    response_format = completions.calls[0]["response_format"]
+    schema = response_format["json_schema"]["schema"]
+    assert schema["required"] == list(schema["properties"])
+    assert schema["additionalProperties"] is False
+
+
 async def test_primary_provider_failure_retries_then_uses_fallback() -> None:
     gateway, completions = gateway_with(
         [
