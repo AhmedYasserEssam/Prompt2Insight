@@ -318,9 +318,9 @@ Respect catalog definitions, approved joins, and the explicit database dialect: 
 Use {dialect.value} SQL syntax only. Do not execute SQL. Return only the required structured
 result. Return needs_clarification when the request cannot safely map to the catalog, and
 unsupported when appropriate. When a query contains metrics grouped by dimensions, honor the
-catalog privacy policy: include a HAVING predicate requiring COUNT(DISTINCT privacy_unit) to be
-at least minimum_group_size, using the exact approved privacy unit from the catalog. Backend
-privacy enforcement and application security validation remain authoritative."""
+catalog privacy policy. Do not expose or directly query sensitive privacy-unit columns; backend
+enforcement adds mandatory minimum-group suppression before execution. Backend privacy
+enforcement and application security validation remain authoritative."""
 
 
 class LiteLLMGateway(VLLMGateway):

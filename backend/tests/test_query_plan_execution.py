@@ -20,7 +20,7 @@ from app.domain.databases.models import (
     TableMetadata,
 )
 from app.infrastructure.catalogs.loader import load_catalog
-from app.infrastructure.catalogs.models import AnalyticsCatalog
+from app.infrastructure.catalogs.models import AnalyticsCatalog, ColumnClassification
 from app.infrastructure.sql.validator import SQLValidator
 
 
@@ -269,31 +269,7 @@ def test_cte_privacy_enforcement_targets_the_grouped_sales_query_block() -> None
 
 
 async def test_sales_month_query_executes_with_enforced_privacy_suppression() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
-    catalog = catalog.model_copy(deep=True)
-    catalog.metrics["revenue"].expressions.postgres = "SUM(analytics.sales.sales)"
-    catalog.dimensions["region"].expressions.postgres = (
-        "DATE_TRUNC('month', analytics.sales.order_date)"
-    )
-    catalog.privacy.privacy_unit = "analytics.sales.customer_id"
-    current = SchemaSnapshot(
-        dialect=SQLDialect.POSTGRES,
-        database_name="analytics",
-        server_version="16",
-        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
-        tables=[
-            TableMetadata(
-                schema_name="analytics",
-                table_name="sales",
-                table_type="table",
-                columns=[
-                    ColumnMetadata(name="sales", data_type="numeric", nullable=False),
-                    ColumnMetadata(name="order_date", data_type="timestamp", nullable=False),
-                    ColumnMetadata(name="customer_id", data_type="integer", nullable=False),
-                ],
-            )
-        ],
-    )
+    catalog, current = sales_catalog_and_snapshot()
     candidate = plan(
         "SELECT DATE_TRUNC('month', analytics.sales.order_date), SUM(analytics.sales.sales) "
         "FROM analytics.sales GROUP BY DATE_TRUNC('month', analytics.sales.order_date)"
@@ -310,6 +286,101 @@ async def test_sales_month_query_executes_with_enforced_privacy_suppression() ->
 
     assert "COUNT(DISTINCT analytics.sales.customer_id) >= 5" in execution.validated.normalized_sql
     assert connector.explained and connector.executed
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT analytics.sales.customer_id, DATE_TRUNC('month', analytics.sales.order_date), "
+        "SUM(analytics.sales.sales) FROM analytics.sales "
+        "GROUP BY analytics.sales.customer_id, DATE_TRUNC('month', analytics.sales.order_date)",
+        "SELECT DATE_TRUNC('month', analytics.sales.order_date), SUM(analytics.sales.sales) "
+        "FROM analytics.sales WHERE analytics.sales.customer_id = 1 "
+        "GROUP BY DATE_TRUNC('month', analytics.sales.order_date)",
+    ],
+)
+async def test_planner_sensitive_privacy_unit_is_rejected_before_injection(sql: str) -> None:
+    catalog, current = sales_catalog_and_snapshot()
+    connector = Connector(current)
+
+    with pytest.raises(Prompt2InsightError) as captured:
+        await QueryPlanExecutor().execute(
+            plan=plan(sql),
+            catalog=catalog,
+            schema_snapshot=current,
+            connector=connector,
+            settings=Settings(),
+        )
+
+    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+    assert not connector.explained and not connector.executed
+
+
+@pytest.mark.parametrize("column", ["customer_name", "internal_note"])
+async def test_other_sensitive_and_prohibited_columns_remain_forbidden(column: str) -> None:
+    catalog, current = sales_catalog_and_snapshot()
+    candidate = plan(
+        "SELECT DATE_TRUNC('month', analytics.sales.order_date), SUM(analytics.sales.sales) "
+        f"FROM analytics.sales WHERE analytics.sales.{column} = 'x' "
+        "GROUP BY DATE_TRUNC('month', analytics.sales.order_date)"
+    )
+
+    with pytest.raises(Prompt2InsightError) as captured:
+        await QueryPlanExecutor().execute(
+            plan=candidate,
+            catalog=catalog,
+            schema_snapshot=current,
+            connector=Connector(current),
+            settings=Settings(),
+        )
+
+    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+
+
+def test_final_policy_exempts_only_the_catalog_privacy_unit() -> None:
+    catalog, current = sales_catalog_and_snapshot()
+    strict = QueryPlanExecutor._policy(catalog, current, Settings())
+    final = QueryPlanExecutor._final_policy(strict, catalog)
+
+    assert "analytics.sales.customer_id" in strict.sensitive_columns
+    assert "analytics.sales.customer_id" not in final.sensitive_columns
+    assert "analytics.sales.customer_name" in final.sensitive_columns
+    assert "analytics.sales.internal_note" in final.prohibited_columns
+
+
+def sales_catalog_and_snapshot() -> tuple[AnalyticsCatalog, SchemaSnapshot]:
+    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+    catalog = catalog.model_copy(deep=True)
+    catalog.metrics["revenue"].expressions.postgres = "SUM(analytics.sales.sales)"
+    catalog.dimensions["region"].expressions.postgres = (
+        "DATE_TRUNC('month', analytics.sales.order_date)"
+    )
+    catalog.privacy.privacy_unit = "analytics.sales.customer_id"
+    catalog.column_policies = {
+        "analytics.sales.customer_id": ColumnClassification.SENSITIVE,
+        "analytics.sales.customer_name": ColumnClassification.SENSITIVE,
+        "analytics.sales.internal_note": ColumnClassification.PROHIBITED,
+    }
+    return catalog, SchemaSnapshot(
+        dialect=SQLDialect.POSTGRES,
+        database_name="analytics",
+        server_version="16",
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
+        tables=[
+            TableMetadata(
+                schema_name="analytics",
+                table_name="sales",
+                table_type="table",
+                columns=[
+                    ColumnMetadata(name="sales", data_type="numeric", nullable=False),
+                    ColumnMetadata(name="order_date", data_type="timestamp", nullable=False),
+                    ColumnMetadata(name="customer_id", data_type="integer", nullable=False),
+                    ColumnMetadata(name="customer_name", data_type="text", nullable=False),
+                    ColumnMetadata(name="internal_note", data_type="text", nullable=True),
+                ],
+            )
+        ],
+    )
 
 
 def test_schema_qualified_sources_are_exact_and_ctes_are_excluded() -> None:

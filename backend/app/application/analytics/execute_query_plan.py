@@ -45,14 +45,20 @@ class QueryPlanExecutor:
         if current_snapshot.fingerprint() != schema_snapshot.fingerprint():
             raise Prompt2InsightError(
                 ErrorCode.SCHEMA_CHANGED, "The schema changed since planning."
-            )
+        )
         catalog.validate_metric_dimensions(plan.metric_ids, plan.dimension_ids)
         self._validate_canonical_expressions(plan, catalog, schema_snapshot.dialect)
+        strict_policy = self._policy(catalog, schema_snapshot, settings)
+        self._validator.validate(
+            sql=plan.sql,
+            dialect=schema_snapshot.dialect,
+            policy=strict_policy,
+        )
         effective_sql = self._enforce_privacy(plan, catalog, schema_snapshot.dialect)
         validated = self._validator.validate(
             sql=effective_sql,
             dialect=schema_snapshot.dialect,
-            policy=self._policy(catalog, schema_snapshot, settings),
+            policy=self._final_policy(strict_policy, catalog),
         )
         self._validate_privacy(validated.normalized_sql, catalog, schema_snapshot.dialect, plan)
         query = PreparedQuery(
@@ -98,6 +104,14 @@ class QueryPlanExecutor:
             maximum_rows=settings.max_output_rows,
         )
         return replace(base, allowed_columns=columns)
+
+    @staticmethod
+    def _final_policy(strict_policy: SQLPolicy, catalog: AnalyticsCatalog) -> SQLPolicy:
+        """Permit only the trusted privacy unit added after strict planner validation."""
+        return replace(
+            strict_policy,
+            sensitive_columns=strict_policy.sensitive_columns - {catalog.privacy.privacy_unit},
+        )
 
     @staticmethod
     def _snapshot_table_name(schema_name: str | None, table_name: str) -> str:
