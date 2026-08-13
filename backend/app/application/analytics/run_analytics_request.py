@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -16,6 +17,8 @@ from app.domain.databases.connector import SQLDatabaseConnector
 from app.domain.databases.models import SchemaSnapshot, SQLDialect
 from app.infrastructure.ai.litellm_gateway import GenerationResult, ModelGroup
 from app.infrastructure.catalogs.models import AnalyticsCatalog
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,15 @@ class AnalyticsRequestService:
                 model_group=self._planner_model_group,
             )
             planner_metadata = result.metadata
+            logger.debug(
+                "Planner produced plan request_id=%s status=%s metric_ids=%s dimension_ids=%s "
+                "database_dialect=%s",
+                request.request_id,
+                result.output.status,
+                result.output.metric_ids,
+                result.output.dimension_ids,
+                result.output.database_dialect.value,
+            )
             if result.output.status != "ready":
                 response = self._planner_response(request=request, result=result)
             elif (
@@ -163,6 +175,12 @@ class AnalyticsRequestService:
                     model_metadata=result.metadata,
                 )
         except Prompt2InsightError as exc:
+            logger.warning(
+                "Analytics request failed request_id=%s error_code=%s detail=%s",
+                request.request_id,
+                exc.code.value,
+                exc.message,
+            )
             response = AnalyticsResponse(
                 status=AnalyticsStatus.FAILED,
                 request_id=request.request_id,

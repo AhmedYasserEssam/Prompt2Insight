@@ -1,6 +1,8 @@
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
+
 from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.application.analytics.run_analytics_request import AnalyticsRequestService, PlanningContext
 from app.core.config import Settings
@@ -129,6 +131,14 @@ class ConnectorResolverStub:
 class UnauthorizedExecutor(QueryPlanExecutor):
     async def execute(self, **_: object):
         raise Prompt2InsightError(ErrorCode.UNAUTHORIZED_TABLE, "Unapproved tables: secret.sales.")
+
+
+class UnauthorizedColumnExecutor(QueryPlanExecutor):
+    async def execute(self, **_: object):
+        raise Prompt2InsightError(
+            ErrorCode.UNAUTHORIZED_COLUMN,
+            "Sensitive columns are not queryable: analytics.sales.customer_id.",
+        )
 
 
 async def test_production_request_reaches_planner_and_persists_planning_context() -> None:
@@ -261,3 +271,71 @@ async def test_execution_failure_preserves_real_planner_metadata() -> None:
 
     assert response.error_code is ErrorCode.UNAUTHORIZED_TABLE
     assert response.model_metadata == metadata
+
+
+@pytest.mark.parametrize(
+    ("executor", "code", "detail"),
+    [
+        (
+            UnauthorizedColumnExecutor(),
+            ErrorCode.UNAUTHORIZED_COLUMN,
+            "Sensitive columns are not queryable: analytics.sales.customer_id.",
+        ),
+        (UnauthorizedExecutor(), ErrorCode.UNAUTHORIZED_TABLE, "Unapproved tables: secret.sales."),
+    ],
+)
+async def test_policy_failure_logs_internal_detail_without_exposing_it(
+    caplog: pytest.LogCaptureFixture,
+    executor: QueryPlanExecutor,
+    code: ErrorCode,
+    detail: str,
+) -> None:
+    catalog, _ = load_catalog(
+        Path(__file__).parents[2] / "catalogs" / "analytics_catalog.example.yaml"
+    )
+    context = PlanningContext(
+        dialect=SQLDialect.MYSQL,
+        catalog=catalog,
+        schema_snapshot=SchemaSnapshot(
+            dialect=SQLDialect.MYSQL,
+            database_name="analytics",
+            server_version="8",
+            tables=[],
+            capabilities=DatabaseCapabilities(dialect=SQLDialect.MYSQL, server_version="8"),
+        ),
+        catalog_revision_id=uuid4(),
+        schema_snapshot_id=uuid4(),
+    )
+    request = AnalyticsRequest(request_id=uuid4(), question="اعرض إجمالي المبيعات لكل شهر")
+    planner = PlannerStub(
+        GenerationResult(
+            output=QueryPlan(
+                status="ready",
+                response_language="ar",
+                database_dialect=SQLDialect.MYSQL,
+                interpretation="المبيعات الشهرية",
+                sql="SELECT 1",
+            ),
+            metadata=ModelExecutionMetadata(provider="litellm", model="test"),
+        )
+    )
+    repository = ProductionRepository(context)
+    service = AnalyticsRequestService(
+        mock_mode=False,
+        repository=repository,
+        planning_context_store=repository,
+        planner=planner,
+        planner_model_group=ModelGroup("planner", "primary", "fallback", QueryPlan),
+        query_executor=executor,
+        connector_resolver=ConnectorResolverStub(context.schema_snapshot),
+        settings=Settings(mock_mode=False),
+    )
+
+    with caplog.at_level("WARNING"):
+        response = await service.run(conversation_id=uuid4(), request=request)
+
+    assert response.error_code is code
+    assert detail not in response.model_dump_json()
+    assert f"request_id={request.request_id}" in caplog.text
+    assert f"error_code={code.value}" in caplog.text
+    assert detail in caplog.text
