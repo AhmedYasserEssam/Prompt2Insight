@@ -19,6 +19,7 @@ from app.domain.databases.models import (
     TableMetadata,
 )
 from app.infrastructure.catalogs.loader import load_catalog
+from app.infrastructure.sql.validator import SQLValidator
 
 
 def snapshot() -> SchemaSnapshot:
@@ -132,6 +133,31 @@ async def test_current_schema_allows_execution() -> None:
         settings=Settings(),
     )
     assert connector.explained and connector.executed
+
+
+def test_schema_qualified_sources_are_exact_and_ctes_are_excluded() -> None:
+    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+    policy = QueryPlanExecutor._policy(catalog, snapshot(), Settings())
+    validator = SQLValidator()
+
+    accepted = validator.validate(
+        sql=(
+            "WITH monthly_sales AS (SELECT analytics.orders.id FROM analytics.orders AS o) "
+            "SELECT id FROM monthly_sales"
+        ),
+        dialect=SQLDialect.POSTGRES,
+        policy=policy,
+    )
+    assert accepted.referenced_tables == frozenset({"analytics.orders"})
+
+    for source in ("private.orders", "unknown.orders"):
+        with pytest.raises(Prompt2InsightError) as captured:
+            validator.validate(
+                sql=f"SELECT id FROM {source}",
+                dialect=SQLDialect.POSTGRES,
+                policy=policy,
+            )
+        assert captured.value.code is ErrorCode.UNAUTHORIZED_TABLE
 
 
 @pytest.mark.parametrize(

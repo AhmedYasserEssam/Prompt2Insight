@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.analytics.run_analytics_request import PlanningContext
-from app.core.errors import ErrorCode
+from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import (
     AnalyticsRequest,
     AnalyticsResponse,
@@ -88,6 +88,7 @@ async def _parents(repository: AnalyticsRequestRepository) -> tuple[PlanningCont
             CatalogRevisionRecord(
                 id=catalog_id,
                 connection_profile_id=profile_id,
+                schema_snapshot_id=snapshot_id,
                 content_hash=sha256(str(catalog_id).encode()).hexdigest(),
                 content=catalog.model_dump(mode="json"),
             )
@@ -110,6 +111,36 @@ async def _parents(repository: AnalyticsRequestRepository) -> tuple[PlanningCont
         connection_profile_id=profile_id,
         credential_reference="P2I_TEST_DB_URL",
     ), conversation_id
+
+
+async def test_planning_context_rejects_catalog_linked_to_old_snapshot(
+    repository: AnalyticsRequestRepository,
+) -> None:
+    _, conversation_id = await _parents(repository)
+    factory = repository._session_factory
+    async with factory() as session:
+        conversation = await session.get(ConversationRecord, conversation_id)
+        assert conversation is not None
+        session.add(
+            SchemaSnapshotRecord(
+                connection_profile_id=conversation.connection_profile_id,
+                content_hash=sha256(str(uuid4()).encode()).hexdigest(),
+                snapshot=SchemaSnapshot(
+                    dialect=SQLDialect.POSTGRES,
+                    database_name="analytics",
+                    server_version="16",
+                    tables=[],
+                    capabilities=DatabaseCapabilities(
+                        dialect=SQLDialect.POSTGRES, server_version="16"
+                    ),
+                ).model_dump(mode="json"),
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(Prompt2InsightError) as captured:
+        await repository.get_planning_context(conversation_id)
+    assert captured.value.code is ErrorCode.CATALOG_STALE
 
 
 @pytest.mark.parametrize(

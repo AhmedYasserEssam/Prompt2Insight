@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.application.analytics.run_analytics_request import AnalyticsRequestService, PlanningContext
 from app.core.config import Settings
+from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import (
     AnalyticsRequest,
     AnalyticsResponse,
@@ -56,6 +57,7 @@ async def test_request_is_persisted_and_recovered_by_global_id() -> None:
     assert created.request_id == request.request_id
     assert recovered == created
     assert repository.saved_conversation_id == conversation_id
+    assert created.model_metadata is None
 
 
 class ProductionRepository(InMemoryRequestRepository):
@@ -122,6 +124,11 @@ class ConnectorResolverStub:
 
     async def connect(self, context):
         return ConnectorStub(self._snapshot)
+
+
+class UnauthorizedExecutor(QueryPlanExecutor):
+    async def execute(self, **_: object):
+        raise Prompt2InsightError(ErrorCode.UNAUTHORIZED_TABLE, "Unapproved tables: secret.sales.")
 
 
 async def test_production_request_reaches_planner_and_persists_planning_context() -> None:
@@ -205,3 +212,52 @@ async def test_production_request_reaches_planner_and_persists_planning_context(
     assert repository.saved_context == context
     assert planner.calls[0]["dialect"] is SQLDialect.MYSQL
     assert planner.calls[0]["catalog"] == catalog
+
+
+async def test_execution_failure_preserves_real_planner_metadata() -> None:
+    catalog, _ = load_catalog(
+        Path(__file__).parents[2] / "catalogs" / "analytics_catalog.example.yaml"
+    )
+    context = PlanningContext(
+        dialect=SQLDialect.MYSQL,
+        catalog=catalog,
+        schema_snapshot=SchemaSnapshot(
+            dialect=SQLDialect.MYSQL,
+            database_name="analytics",
+            server_version="8",
+            tables=[],
+            capabilities=DatabaseCapabilities(dialect=SQLDialect.MYSQL, server_version="8"),
+        ),
+        catalog_revision_id=uuid4(),
+        schema_snapshot_id=uuid4(),
+    )
+    metadata = ModelExecutionMetadata(
+        provider="litellm", model="groq/qwen", generation_stage="planner"
+    )
+    planner = PlannerStub(
+        GenerationResult(
+            output=QueryPlan(
+                status="ready", response_language="en", database_dialect=SQLDialect.MYSQL,
+                interpretation="sales", sql="SELECT 1",
+            ),
+            metadata=metadata,
+        )
+    )
+    repository = ProductionRepository(context)
+    service = AnalyticsRequestService(
+        mock_mode=False,
+        repository=repository,
+        planning_context_store=repository,
+        planner=planner,
+        planner_model_group=ModelGroup("planner", "primary", "fallback", QueryPlan),
+        query_executor=UnauthorizedExecutor(),
+        connector_resolver=ConnectorResolverStub(context.schema_snapshot),
+        settings=Settings(mock_mode=False),
+    )
+
+    response = await service.run(
+        conversation_id=uuid4(), request=AnalyticsRequest(request_id=uuid4(), question="sales")
+    )
+
+    assert response.error_code is ErrorCode.UNAUTHORIZED_TABLE
+    assert response.model_metadata == metadata

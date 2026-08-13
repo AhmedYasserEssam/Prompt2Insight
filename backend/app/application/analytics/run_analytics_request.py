@@ -116,6 +116,7 @@ class AnalyticsRequestService:
             raise RuntimeError("Production planner dependencies are not configured.")
 
         context = await self._planning_context_store.get_planning_context(conversation_id)
+        planner_metadata = None
         try:
             result = await self._planner.plan(
                 question=request.question,
@@ -124,6 +125,7 @@ class AnalyticsRequestService:
                 schema_snapshot=context.schema_snapshot,
                 model_group=self._planner_model_group,
             )
+            planner_metadata = result.metadata
             if result.output.status != "ready":
                 response = self._planner_response(request=request, result=result)
             elif (
@@ -167,6 +169,7 @@ class AnalyticsRequestService:
                 language=language,
                 error_code=exc.code,
                 retryable=exc.retryable,
+                model_metadata=planner_metadata,
             )
         return await self._repository.save(
             conversation_id=conversation_id,

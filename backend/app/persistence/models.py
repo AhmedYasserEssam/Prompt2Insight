@@ -3,7 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, Uuid, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -37,12 +47,21 @@ class ConversationRecord(Base):
 
 class CatalogRevisionRecord(Base):
     __tablename__ = "catalog_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "connection_profile_id", "content_hash", "schema_snapshot_id",
+            name="uq_catalog_revision_profile_content_snapshot",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     connection_profile_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("connection_profiles.id")
     )
-    content_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    schema_snapshot_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("schema_snapshots.id")
+    )
+    content_hash: Mapped[str] = mapped_column(String(64))
     content: Mapped[dict[str, object]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
