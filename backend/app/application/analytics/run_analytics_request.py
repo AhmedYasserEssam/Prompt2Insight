@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from app.application.analytics.answer_validation import validate_answer_output
 from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.application.analytics.resolve_language import resolve_response_language
 from app.core.config import Settings
@@ -11,7 +12,9 @@ from app.domain.analytics.models import (
     AnalyticsRequest,
     AnalyticsResponse,
     AnalyticsStatus,
+    AnswerOutput,
     QueryPlan,
+    ResultTable,
 )
 from app.domain.databases.connector import SQLDatabaseConnector
 from app.domain.databases.models import SchemaSnapshot, SQLDialect
@@ -61,6 +64,18 @@ class QueryPlanner(Protocol):
     ) -> GenerationResult[QueryPlan]: ...
 
 
+class AnswerGenerator(Protocol):
+    async def generate(
+        self,
+        *,
+        model_group: ModelGroup[AnswerOutput],
+        system_prompt: str,
+        user_prompt: str,
+        generation_stage: str | None = None,
+        database_dialect: SQLDialect | None = None,
+    ) -> GenerationResult[AnswerOutput]: ...
+
+
 class ConnectorResolver(Protocol):
     async def connect(self, context: PlanningContext) -> SQLDatabaseConnector: ...
 
@@ -74,6 +89,8 @@ class AnalyticsRequestService:
         planning_context_store: PlanningContextStore | None = None,
         planner: QueryPlanner | None = None,
         planner_model_group: ModelGroup[QueryPlan] | None = None,
+        answerer: AnswerGenerator | None = None,
+        answer_model_group: ModelGroup[AnswerOutput] | None = None,
         query_executor: QueryPlanExecutor | None = None,
         connector_resolver: ConnectorResolver | None = None,
         settings: Settings | None = None,
@@ -83,6 +100,8 @@ class AnalyticsRequestService:
         self._planning_context_store = planning_context_store
         self._planner = planner
         self._planner_model_group = planner_model_group
+        self._answerer = answerer
+        self._answer_model_group = answer_model_group
         self._query_executor = query_executor
         self._connector_resolver = connector_resolver
         self._settings = settings
@@ -158,6 +177,22 @@ class AnalyticsRequestService:
                     )
                 finally:
                     await connector.close()
+                table = self._query_executor.result_table(execution.result)
+                answer_output = AnswerOutput(answer="")
+                answer_metadata = None
+                if execution.result.row_count:
+                    if self._answerer is None or self._answer_model_group is None:
+                        raise RuntimeError("Production answer dependencies are not configured.")
+                    answer_result = await self._answerer.generate(
+                        model_group=self._answer_model_group,
+                        system_prompt=_answer_system_prompt(result.output.response_language),
+                        user_prompt=_answer_user_prompt(request.question, table),
+                        generation_stage="answer",
+                        database_dialect=context.dialect,
+                    )
+                    validate_answer_output(answer_result.output, table)
+                    answer_output = answer_result.output
+                    answer_metadata = answer_result.metadata
                 response = AnalyticsResponse(
                     status=(
                         AnalyticsStatus.EMPTY_RESULT
@@ -166,13 +201,22 @@ class AnalyticsRequestService:
                     ),
                     request_id=request.request_id,
                     language=result.output.response_language,
-                    table=self._query_executor.result_table(execution.result),
+                    answer=answer_output.answer or None,
+                    insights=answer_output.insights,
+                    table=table,
+                    chart=answer_output.chart,
                     sql=execution.validated.normalized_sql,
                     query_plan=result.output,
-                    warnings=["Result rows were truncated to the configured limit."]
-                    if execution.result.truncated
-                    else [],
+                    warnings=[
+                        *answer_output.warnings,
+                        *(
+                            [_truncation_warning(result.output.response_language)]
+                            if execution.result.truncated
+                            else []
+                        ),
+                    ],
                     model_metadata=result.metadata,
+                    answer_model_metadata=answer_metadata,
                 )
         except Prompt2InsightError as exc:
             logger.warning(
@@ -222,3 +266,25 @@ class AnalyticsRequestService:
 
     async def get(self, request_id: UUID) -> AnalyticsResponse | None:
         return await self._repository.get(request_id)
+
+
+def _answer_system_prompt(language: str) -> str:
+    return f"""You are the Prompt2Insight answer writer. Respond in {language}.
+Use only the executed result table supplied by the user. Do not calculate, estimate, infer,
+or mention any number that is not literally present in that table. Keep the answer concise.
+You may propose a chart only by referencing exact result-table column names in x_column and
+y_columns. Never include data points or values in a chart specification. Localize the answer,
+chart title, warnings, and empty-state wording to the requested language. Return only the
+required structured JSON result."""
+
+
+def _answer_user_prompt(question: str, table: ResultTable) -> str:
+    return f"User question:\n{question}\n\nExecuted result table (JSON):\n{table.model_dump_json()}"
+
+
+def _truncation_warning(language: str) -> str:
+    return (
+        "تم اقتطاع صفوف النتائج عند الحد المسموح به."
+        if language == "ar"
+        else "Result rows were truncated to the configured limit."
+    )

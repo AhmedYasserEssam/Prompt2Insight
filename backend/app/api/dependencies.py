@@ -15,12 +15,16 @@ from app.persistence.repositories import AnalyticsRequestRepository, ConnectionP
 def get_analytics_request_service() -> AnalyticsRequestService:
     settings = get_settings()
     repository = AnalyticsRequestRepository(create_session_factory(settings.app_database_url))
+    gateway = LiteLLMGateway.from_settings(settings)
+    model_groups = build_analytics_model_groups(settings)
     return AnalyticsRequestService(
         mock_mode=settings.mock_mode,
         repository=repository,
         planning_context_store=repository,
-        planner=LiteLLMGateway.from_settings(settings),
-        planner_model_group=build_analytics_model_groups(settings).planner,
+        planner=gateway,
+        planner_model_group=model_groups.planner,
+        answerer=gateway,
+        answer_model_group=model_groups.answer,
         query_executor=QueryPlanExecutor(),
         connector_resolver=EnvironmentConnectorResolver(),
         settings=settings,

@@ -5,6 +5,11 @@ export type AnalyticsResponse = {
   request_id: string;
   language: "en" | "ar";
   answer?: string | null;
+  insights: string[];
+  table?: {columns: string[]; rows: unknown[][]} | null;
+  chart?: {chart_type: "bar" | "line" | "pie" | "scatter"; x_column: string; y_columns: string[]; title: string} | null;
+  sql?: string | null;
+  warnings: string[];
   error_code?: string | null;
   retryable: boolean;
 };

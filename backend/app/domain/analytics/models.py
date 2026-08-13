@@ -109,3 +109,4 @@ class AnalyticsResponse(BaseModel):
     error_code: ErrorCode | None = None
     retryable: bool = False
     model_metadata: ModelExecutionMetadata | None = None
+    answer_model_metadata: ModelExecutionMetadata | None = None

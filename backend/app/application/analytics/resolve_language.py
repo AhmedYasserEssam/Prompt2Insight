@@ -15,5 +15,4 @@ def resolve_response_language(question: str, requested: ResponseLanguage) -> str
     if not letters:
         return "en"
 
-    arabic_count = sum(bool(_ARABIC.match(character)) for character in letters)
-    return "ar" if arabic_count / len(letters) >= 0.35 else "en"
+    return "ar" if any(_ARABIC.match(character) for character in letters) else "en"

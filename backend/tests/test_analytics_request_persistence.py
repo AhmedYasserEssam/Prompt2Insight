@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.application.analytics.execute_query_plan import QueryPlanExecutor
+from app.application.analytics.execute_query_plan import ExecutedPlan, QueryPlanExecutor
 from app.application.analytics.run_analytics_request import AnalyticsRequestService, PlanningContext
 from app.core.config import Settings
 from app.core.errors import ErrorCode, Prompt2InsightError
@@ -11,6 +11,7 @@ from app.domain.analytics.models import (
     AnalyticsRequest,
     AnalyticsResponse,
     AnalyticsStatus,
+    AnswerOutput,
     ModelExecutionMetadata,
     QueryPlan,
 )
@@ -25,6 +26,7 @@ from app.domain.databases.models import (
 )
 from app.infrastructure.ai.litellm_gateway import GenerationResult, ModelGroup
 from app.infrastructure.catalogs.loader import load_catalog
+from app.infrastructure.sql.validator import ValidatedSQL
 
 
 class InMemoryRequestRepository:
@@ -95,6 +97,16 @@ class PlannerStub:
         return self.result
 
 
+class AnswererStub:
+    def __init__(self, result: GenerationResult[AnswerOutput]) -> None:
+        self.result = result
+        self.calls: list[dict[str, object]] = []
+
+    async def generate(self, **kwargs: object) -> GenerationResult[AnswerOutput]:
+        self.calls.append(kwargs)
+        return self.result
+
+
 class ConnectorStub:
     dialect = SQLDialect.MYSQL
 
@@ -138,6 +150,17 @@ class UnauthorizedColumnExecutor(QueryPlanExecutor):
         raise Prompt2InsightError(
             ErrorCode.UNAUTHORIZED_COLUMN,
             "Sensitive columns are not queryable: analytics.sales.customer_id.",
+        )
+
+
+class SuccessfulExecutor(QueryPlanExecutor):
+    async def execute(self, **_: object) -> ExecutedPlan:
+        return ExecutedPlan(
+            validated=ValidatedSQL("SELECT region, revenue", frozenset(), frozenset(), 0),
+            result=QueryResult(
+                columns=["region", "revenue"], rows=[["Cairo", 10]], row_count=1,
+                truncated=False, duration_ms=1,
+            ),
         )
 
 
@@ -202,12 +225,20 @@ async def test_production_request_reaches_planner_and_persists_planning_context(
         )
     )
     repository = ProductionRepository(context)
+    answerer = AnswererStub(
+        GenerationResult(
+            output=AnswerOutput(answer="إيرادات القاهرة هي 10."),
+            metadata=ModelExecutionMetadata(generation_stage="answer"),
+        )
+    )
     service = AnalyticsRequestService(
         mock_mode=False,
         repository=repository,
         planning_context_store=repository,
         planner=planner,
         planner_model_group=ModelGroup("planner", "primary", "fallback", QueryPlan),
+        answerer=answerer,
+        answer_model_group=ModelGroup("answer", "primary", "fallback", AnswerOutput),
         query_executor=QueryPlanExecutor(),
         connector_resolver=ConnectorResolverStub(context.schema_snapshot),
         settings=Settings(mock_mode=False),
@@ -222,6 +253,69 @@ async def test_production_request_reaches_planner_and_persists_planning_context(
     assert repository.saved_context == context
     assert planner.calls[0]["dialect"] is SQLDialect.MYSQL
     assert planner.calls[0]["catalog"] == catalog
+
+
+async def test_production_request_generates_a_grounded_answer_from_executed_rows() -> None:
+    catalog, _ = load_catalog(
+        Path(__file__).parents[2] / "catalogs" / "analytics_catalog.example.yaml"
+    )
+    snapshot = SchemaSnapshot(
+        dialect=SQLDialect.MYSQL,
+        database_name="analytics",
+        server_version="8",
+        tables=[],
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.MYSQL, server_version="8"),
+    )
+    context = PlanningContext(
+        dialect=SQLDialect.MYSQL,
+        catalog=catalog,
+        schema_snapshot=snapshot,
+        catalog_revision_id=uuid4(),
+        schema_snapshot_id=uuid4(),
+    )
+    planner = PlannerStub(
+        GenerationResult(
+            output=QueryPlan(
+                status="ready",
+                response_language="ar",
+                database_dialect=SQLDialect.MYSQL,
+                interpretation="revenue by region",
+                metric_ids=["revenue"],
+                dimension_ids=["region"],
+                sql="SELECT 1",
+            ),
+            metadata=ModelExecutionMetadata(generation_stage="planner"),
+        )
+    )
+    answerer = AnswererStub(
+        GenerationResult(
+            output=AnswerOutput(answer="إيرادات القاهرة هي 10."),
+            metadata=ModelExecutionMetadata(generation_stage="answer"),
+        )
+    )
+    service = AnalyticsRequestService(
+        mock_mode=False,
+        repository=ProductionRepository(context),
+        planning_context_store=ProductionRepository(context),
+        planner=planner,
+        planner_model_group=ModelGroup("planner", "primary", "fallback", QueryPlan),
+        answerer=answerer,
+        answer_model_group=ModelGroup("answer", "primary", "fallback", AnswerOutput),
+        query_executor=SuccessfulExecutor(),
+        connector_resolver=ConnectorResolverStub(snapshot),
+        settings=Settings(mock_mode=False),
+    )
+
+    response = await service.run(
+        conversation_id=uuid4(),
+        request=AnalyticsRequest(request_id=uuid4(), question="وريني revenue"),
+    )
+
+    assert response.answer == "إيرادات القاهرة هي 10."
+    assert response.insights == []
+    assert response.answer_model_metadata == answerer.result.metadata
+    assert answerer.calls[0]["model_group"].name == "answer"
+    assert '[["Cairo",10]]' in answerer.calls[0]["user_prompt"]
 
 
 async def test_execution_failure_preserves_real_planner_metadata() -> None:
