@@ -396,3 +396,46 @@ async def test_published_catalog_persists_and_reloads_canonical_references(
     assert context.catalog.metric_expression("revenue", SQLDialect.POSTGRES) == (
         "SUM(analytics.sales.sales)"
     )
+
+
+async def test_schema_snapshot_persists_postgres_namespace(
+    repository: AnalyticsRequestRepository,
+) -> None:
+    profile_id = uuid4()
+    snapshot = SchemaSnapshot(
+        dialect=SQLDialect.POSTGRES,
+        database_name=str(profile_id),
+        server_version="16",
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
+        tables=[
+            TableMetadata(
+                schema_name="analytics",
+                table_name="sales",
+                table_type="table",
+                columns=[ColumnMetadata(name="sales", data_type="numeric", nullable=False)],
+            )
+        ],
+    )
+    factory = repository._session_factory
+    async with factory() as session:
+        session.add(
+            ConnectionProfileRecord(
+                id=profile_id,
+                name=str(profile_id),
+                dialect="postgres",
+                host="db",
+                port=5432,
+                database_name="analytics",
+                username="analytics",
+                credential_reference="P2I_TEST_DB_URL",
+            )
+        )
+        await session.commit()
+
+    profiles = ConnectionProfileRepository(factory)
+    await profiles.save_snapshot(profile_id, snapshot)
+    record = await profiles.get_schema_snapshot_record(profile_id)
+
+    assert record is not None
+    assert record.snapshot["tables"][0]["schema_name"] == "analytics"  # type: ignore[index]
+    assert SchemaSnapshot.model_validate(record.snapshot).tables[0].schema_name == "analytics"

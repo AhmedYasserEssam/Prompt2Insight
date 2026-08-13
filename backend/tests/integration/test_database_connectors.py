@@ -5,6 +5,7 @@ import pytest
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import PreparedQuery, SQLDialect
 from app.infrastructure.databases.factory import create_database_connector
+from app.infrastructure.databases.postgresql import PostgreSQLConnector
 
 pytestmark = pytest.mark.skipif(
     os.getenv("P2I_RUN_INTEGRATION") != "1",
@@ -44,6 +45,24 @@ async def test_analytics_role_can_connect_and_introspect_visible_schema(connecto
 
     assert schema.dialect is connector.dialect
     assert any(table.table_name == "orders" for table in schema.tables)
+    if connector.dialect is SQLDialect.POSTGRES:
+        assert any(
+            table.schema_name == "analytics" and table.table_name == "orders"
+            for table in schema.tables
+        )
+
+
+async def test_postgres_introspection_discovers_actual_namespace_without_approved_schemas() -> None:
+    connector = PostgreSQLConnector(os.environ["P2I_POSTGRES_ANALYTICS_URL"], approved_schemas=())
+    try:
+        snapshot = await connector.get_schema_snapshot()
+    finally:
+        await connector.close()
+
+    assert any(
+        table.schema_name == "analytics" and table.table_name == "orders"
+        for table in snapshot.tables
+    )
 
 
 async def test_connector_returns_json_explain_plan(connector) -> None:

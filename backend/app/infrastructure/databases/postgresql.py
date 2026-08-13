@@ -3,7 +3,8 @@ import json
 import time
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -14,6 +15,7 @@ from app.domain.databases.models import (
     PreparedQuery,
     QueryResult,
     SQLDialect,
+    TableMetadata,
 )
 from app.infrastructure.databases.base import SQLAlchemyConnectorBase
 
@@ -28,6 +30,15 @@ class PostgreSQLConnector(SQLAlchemyConnectorBase):
 
     async def _get_database_name(self, connection: AsyncConnection) -> str:
         return str((await connection.execute(text("SELECT current_database()"))).scalar_one())
+
+    def _inspect_tables(self, connection: Connection) -> list[TableMetadata]:
+        inspector = inspect(connection)
+        schemas = self._approved_schemas or tuple(
+            schema
+            for schema in inspector.get_schema_names()
+            if schema != "information_schema" and not schema.startswith("pg_")
+        )
+        return self._inspect_tables_in_schemas(connection, schemas)
 
     def _capabilities(self, server_version: str) -> DatabaseCapabilities:
         return DatabaseCapabilities(dialect=self.dialect, server_version=server_version)

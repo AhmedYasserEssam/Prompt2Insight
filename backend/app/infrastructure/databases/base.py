@@ -56,8 +56,14 @@ class SQLAlchemyConnectorBase(SQLDatabaseConnector):
         )
 
     def _inspect_tables(self, connection: Connection) -> list[TableMetadata]:
-        inspector = inspect(connection)
         schemas: Sequence[str | None] = self._approved_schemas or (None,)
+        return self._inspect_tables_in_schemas(connection, schemas)
+
+    @staticmethod
+    def _inspect_tables_in_schemas(
+        connection: Connection, schemas: Sequence[str | None]
+    ) -> list[TableMetadata]:
+        inspector = inspect(connection)
         output: list[TableMetadata] = []
 
         for schema in schemas:
