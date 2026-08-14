@@ -5,7 +5,9 @@ from app.domain.databases.models import SQLDialect
 from app.infrastructure.sql.validator import SQLPolicy, SQLValidator
 
 POLICY = SQLPolicy(
-    allowed_tables=frozenset({"analytics.orders", "analytics.order_items", "analytics.customers"}),
+    allowed_tables=frozenset(
+        {"analytics.orders", "analytics.order_items", "analytics.customers"}
+    ),
     allowed_columns=frozenset(
         {
             "analytics.orders.id",
@@ -13,16 +15,9 @@ POLICY = SQLPolicy(
             "analytics.orders.customer_id",
             "analytics.order_items.order_id",
             "analytics.order_items.net_amount",
+            "analytics.customers.id",
             "analytics.customers.email",
             "analytics.customers.phone",
-        }
-    ),
-    sensitive_columns=frozenset({"analytics.customers.email"}),
-    prohibited_columns=frozenset({"analytics.customers.phone"}),
-    allowed_joins=frozenset(
-        {
-            ("analytics.orders.id", "analytics.order_items.order_id", "inner"),
-            ("analytics.orders.id", "analytics.order_items.order_id", "left"),
         }
     ),
     maximum_rows=10,
@@ -33,8 +28,8 @@ POLICY = SQLPolicy(
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT id FROM analytics.orders",
-        "WITH x AS (SELECT id FROM analytics.orders) SELECT id FROM x",
+        "SELECT analytics.orders.id FROM analytics.orders",
+        "WITH x AS (SELECT analytics.orders.id FROM analytics.orders) SELECT x.id FROM x",
     ],
 )
 def test_safe_selects_are_allowed(dialect: SQLDialect, sql: str) -> None:
@@ -45,9 +40,7 @@ def test_safe_selects_are_allowed(dialect: SQLDialect, sql: str) -> None:
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT id FROM analytics.orders; SELECT id FROM analytics.orders",
-        "SELECT ';' FROM analytics.orders; SELECT id FROM analytics.orders",
-        "SELECT id FROM analytics.orders /* ; */; SELECT id FROM analytics.orders",
+        "SELECT analytics.orders.id FROM analytics.orders; SELECT 1",
         "INSERT INTO analytics.orders VALUES (1)",
         "UPDATE analytics.orders SET id = 2",
         "DELETE FROM analytics.orders",
@@ -58,7 +51,9 @@ def test_safe_selects_are_allowed(dialect: SQLDialect, sql: str) -> None:
         "WITH x AS (DELETE FROM analytics.orders RETURNING id) SELECT id FROM x",
     ],
 )
-def test_mutation_and_multiple_statements_are_rejected(dialect: SQLDialect, sql: str) -> None:
+def test_mutation_and_multiple_statements_are_rejected(
+    dialect: SQLDialect, sql: str
+) -> None:
     with pytest.raises(Prompt2InsightError):
         SQLValidator().validate(sql=sql, dialect=dialect, policy=POLICY)
 
@@ -66,11 +61,17 @@ def test_mutation_and_multiple_statements_are_rejected(dialect: SQLDialect, sql:
 @pytest.mark.parametrize(
     "dialect, sql",
     [
-        (SQLDialect.POSTGRES, "SELECT id INTO new_table FROM analytics.orders"),
-        (SQLDialect.POSTGRES, "SELECT id FROM analytics.orders FOR UPDATE"),
-        (SQLDialect.POSTGRES, "SELECT id FROM analytics.orders FOR SHARE"),
-        (SQLDialect.MYSQL, "SELECT id FROM analytics.orders INTO OUTFILE '/tmp/x'"),
-        (SQLDialect.MYSQL, "SELECT id FROM analytics.orders INTO DUMPFILE '/tmp/x'"),
+        (SQLDialect.POSTGRES, "SELECT analytics.orders.id INTO new_table FROM analytics.orders"),
+        (SQLDialect.POSTGRES, "SELECT analytics.orders.id FROM analytics.orders FOR UPDATE"),
+        (SQLDialect.POSTGRES, "SELECT analytics.orders.id FROM analytics.orders FOR SHARE"),
+        (
+            SQLDialect.MYSQL,
+            "SELECT analytics.orders.id FROM analytics.orders INTO OUTFILE '/tmp/x'",
+        ),
+        (
+            SQLDialect.MYSQL,
+            "SELECT analytics.orders.id FROM analytics.orders INTO DUMPFILE '/tmp/x'",
+        ),
     ],
 )
 def test_dangerous_select_forms_are_rejected(dialect: SQLDialect, sql: str) -> None:
@@ -78,77 +79,95 @@ def test_dangerous_select_forms_are_rejected(dialect: SQLDialect, sql: str) -> N
         SQLValidator().validate(sql=sql, dialect=dialect, policy=POLICY)
 
 
-@pytest.mark.parametrize("dialect", [SQLDialect.POSTGRES, SQLDialect.MYSQL])
 @pytest.mark.parametrize(
-    "sql",
+    "dialect, sql, code",
     [
-        "SELECT id FROM pg_catalog.pg_tables",
-        "SELECT table_name FROM information_schema.tables",
-        "SELECT id FROM mysql.user",
-        "SELECT id FROM performance_schema.events_statements_current",
-        "SELECT id FROM sys.sys_config",
-        "SELECT id FROM analytics.unknown",
-        "SELECT unknown FROM analytics.orders",
-        "SELECT email FROM analytics.customers",
-        "SELECT phone FROM analytics.customers",
-        "SELECT SUM(email) FROM analytics.customers",
-        "SELECT customers.* FROM analytics.customers",
-        "SELECT * FROM analytics.orders",
-        "SELECT pg_sleep(1) FROM analytics.orders",
-        "SELECT sleep(1) FROM analytics.orders",
-        "SELECT arbitrary_udf(id) FROM analytics.orders",
+        (
+            SQLDialect.POSTGRES,
+            "SELECT id FROM pg_catalog.pg_tables",
+            ErrorCode.UNAUTHORIZED_TABLE,
+        ),
+        (
+            SQLDialect.POSTGRES,
+            "SELECT table_name FROM information_schema.tables",
+            ErrorCode.UNAUTHORIZED_TABLE,
+        ),
+        (SQLDialect.MYSQL, "SELECT id FROM mysql.user", ErrorCode.UNAUTHORIZED_TABLE),
+        (
+            SQLDialect.POSTGRES,
+            "SELECT analytics.orders.fake FROM analytics.orders",
+            ErrorCode.UNAUTHORIZED_COLUMN,
+        ),
+        (SQLDialect.POSTGRES, "SELECT * FROM analytics.orders", ErrorCode.SQL_POLICY_REJECTED),
+        (
+            SQLDialect.POSTGRES,
+            "SELECT pg_sleep(1) FROM analytics.orders",
+            ErrorCode.SQL_POLICY_REJECTED,
+        ),
+        (
+            SQLDialect.POSTGRES,
+            "SELECT pg_read_file('/etc/passwd') FROM analytics.orders",
+            ErrorCode.SQL_POLICY_REJECTED,
+        ),
+        (
+            SQLDialect.POSTGRES,
+            "SELECT set_config('x', 'y', false) FROM analytics.orders",
+            ErrorCode.SQL_POLICY_REJECTED,
+        ),
+        (
+            SQLDialect.MYSQL,
+            "SELECT load_file('/etc/passwd') FROM analytics.orders",
+            ErrorCode.SQL_POLICY_REJECTED,
+        ),
     ],
 )
-def test_table_column_and_function_policy_is_fail_closed(dialect: SQLDialect, sql: str) -> None:
-    with pytest.raises(Prompt2InsightError):
+def test_physical_access_and_dangerous_functions_fail_closed(
+    dialect: SQLDialect, sql: str, code: ErrorCode
+) -> None:
+    with pytest.raises(Prompt2InsightError) as captured:
         SQLValidator().validate(sql=sql, dialect=dialect, policy=POLICY)
+    assert captured.value.code is code
 
 
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT o.id FROM analytics.orders o JOIN analytics.order_items i ON o.id = i.order_id",
-        "SELECT COUNT(o.id) FROM analytics.orders o",
-        "SELECT DATE_TRUNC('month', o.id) FROM analytics.orders o",
+        "SELECT AVG(analytics.order_items.net_amount) FROM analytics.order_items",
+        "SELECT MIN(analytics.order_items.net_amount), "
+        "MAX(analytics.order_items.net_amount) FROM analytics.order_items",
+        "SELECT COUNT(DISTINCT analytics.orders.customer_id) FROM analytics.orders",
+        "SELECT SUM(analytics.order_items.net_amount) / "
+        "NULLIF(COUNT(analytics.order_items.order_id), 0) FROM analytics.order_items",
+        "SELECT DATE_TRUNC('month', analytics.orders.id), "
+        "EXTRACT(YEAR FROM analytics.orders.id) FROM analytics.orders",
+        "SELECT CASE WHEN analytics.orders.region IS NULL THEN 'unknown' "
+        "ELSE analytics.orders.region END FROM analytics.orders",
+        "SELECT arbitrary_analytics_udf(analytics.orders.id) FROM analytics.orders",
     ],
 )
-def test_approved_joins_and_functions(sql: str) -> None:
+def test_normal_and_derived_analytics_functions_are_allowed(sql: str) -> None:
     SQLValidator().validate(sql=sql, dialect=SQLDialect.POSTGRES, policy=POLICY)
 
 
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "SELECT o.id FROM analytics.orders o CROSS JOIN analytics.order_items i",
-        "SELECT o.id FROM analytics.orders o NATURAL JOIN analytics.order_items i",
-        (
-            "SELECT o.id FROM analytics.orders o RIGHT JOIN analytics.order_items i "
-            "ON o.id = i.order_id"
+def test_valid_equality_join_requires_no_semantic_contract() -> None:
+    result = SQLValidator().validate(
+        sql=(
+            "SELECT o.id, c.email FROM analytics.orders o "
+            "JOIN analytics.customers c ON o.customer_id = c.id"
         ),
-        "SELECT o.id FROM analytics.orders o JOIN analytics.order_items i ON o.id = i.net_amount",
-        "SELECT a.id FROM analytics.orders a JOIN analytics.orders b ON a.id = b.id",
-    ],
-)
-def test_unapproved_join_forms_are_rejected(sql: str) -> None:
-    with pytest.raises(Prompt2InsightError):
-        SQLValidator().validate(sql=sql, dialect=SQLDialect.POSTGRES, policy=POLICY)
+        dialect=SQLDialect.POSTGRES,
+        policy=POLICY,
+    )
 
-
-def test_error_categories_are_specific() -> None:
-    with pytest.raises(Prompt2InsightError) as captured:
-        SQLValidator().validate(
-            sql="SELECT id FROM pg_catalog.pg_tables", dialect=SQLDialect.POSTGRES, policy=POLICY
-        )
-    assert captured.value.code is ErrorCode.UNAUTHORIZED_TABLE
+    assert result.join_count == 1
 
 
 @pytest.mark.parametrize(
     ("sql", "expected_limit"),
     [
-        ("SELECT id FROM analytics.orders", "LIMIT 10"),
-        ("SELECT id FROM analytics.orders LIMIT 4", "LIMIT 4"),
-        ("SELECT id FROM analytics.orders LIMIT 10", "LIMIT 10"),
-        ("SELECT id FROM analytics.orders LIMIT 99", "LIMIT 10"),
+        ("SELECT analytics.orders.id FROM analytics.orders", "LIMIT 10"),
+        ("SELECT analytics.orders.id FROM analytics.orders LIMIT 4", "LIMIT 4"),
+        ("SELECT analytics.orders.id FROM analytics.orders LIMIT 99", "LIMIT 10"),
     ],
 )
 def test_output_limit_is_enforced(sql: str, expected_limit: str) -> None:
@@ -159,7 +178,7 @@ def test_output_limit_is_enforced(sql: str, expected_limit: str) -> None:
 def test_parameterized_limit_is_rejected() -> None:
     with pytest.raises(Prompt2InsightError):
         SQLValidator().validate(
-            sql="SELECT id FROM analytics.orders LIMIT :limit",
+            sql="SELECT analytics.orders.id FROM analytics.orders LIMIT :limit",
             dialect=SQLDialect.POSTGRES,
             policy=POLICY,
         )

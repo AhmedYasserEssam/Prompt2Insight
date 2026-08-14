@@ -6,7 +6,7 @@ from sqlglot.errors import ParseError
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.connection_profiles import CatalogStatus, CatalogValidationResult
 from app.domain.databases.models import SchemaSnapshot, SQLDialect
-from app.infrastructure.catalogs.models import AnalyticsCatalog, ColumnClassification
+from app.infrastructure.catalogs.models import AnalyticsCatalog
 from app.persistence.models import SchemaSnapshotRecord
 from app.persistence.repositories import ConnectionProfileRepository
 
@@ -132,16 +132,6 @@ class CatalogConfigurationService:
                 SQLDialect.MYSQL,
                 snapshot.dialect is SQLDialect.MYSQL,
             )
-        for join in canonical.join_contracts:
-            join.left = canonicalize(join.left, "Join left key", snapshot.dialect, True)
-            join.right = canonicalize(join.right, "Join right key", snapshot.dialect, True)
-        canonical.column_policies = {
-            canonicalize(column, "Column policy", snapshot.dialect, True): classification
-            for column, classification in canonical.column_policies.items()
-        }
-        canonical.privacy.privacy_unit = canonicalize(
-            canonical.privacy.privacy_unit, "Privacy unit", snapshot.dialect, True
-        )
         errors.extend(CatalogConfigurationService._validate_catalog(canonical, snapshot))
         return canonical, errors
 
@@ -204,28 +194,6 @@ class CatalogConfigurationService:
                 f'Dimension "{dimension_id}"', dimension.expressions.for_dialect(snapshot.dialect),
                 snapshot.dialect.value, columns, tables
             ))
-        for join in catalog.join_contracts:
-            if not join.relationship.strip():
-                errors.append(f"Join {join.left} → {join.right}: relationship is required.")
-            if not set(join.allowed_types).issubset({"inner", "left"}) or not join.allowed_types:
-                errors.append(
-                    f"Join {join.left} → {join.right}: only INNER and LEFT joins are allowed."
-                )
-            for key in (join.left, join.right):
-                if key not in columns:
-                    errors.append(f"Join column {key} does not exist in the schema snapshot.")
-        for column, classification in catalog.column_policies.items():
-            if column not in columns:
-                errors.append(f"Column policy references unknown column {column}.")
-            elif classification not in ColumnClassification:
-                errors.append(f"Column policy {column} has an invalid classification.")
-        if catalog.privacy.privacy_unit not in columns:
-            errors.append("Privacy unit must be a discovered, fully qualified column.")
-        elif (
-            catalog.column_policies.get(catalog.privacy.privacy_unit)
-            is ColumnClassification.PROHIBITED
-        ):
-            errors.append("Privacy unit cannot be a prohibited column.")
         return errors
 
     @staticmethod

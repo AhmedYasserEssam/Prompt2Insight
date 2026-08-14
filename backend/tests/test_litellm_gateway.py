@@ -15,12 +15,23 @@ from app.infrastructure.ai.litellm_gateway import (
     LiteLLMGateway,
     ModelGroup,
     VLLMGateway,
+    _planner_system_prompt,
     _strict_json_schema,
     build_analytics_model_groups,
 )
 from app.infrastructure.catalogs.loader import load_catalog
 
 CATALOG_PATH = Path(__file__).parents[2] / "catalogs" / "analytics_catalog.example.yaml"
+
+
+def test_planner_prompt_treats_catalog_as_guidance_and_allows_derived_metrics() -> None:
+    prompt = " ".join(_planner_system_prompt(SQLDialect.POSTGRES).split())
+
+    assert "business-definition guidance" in prompt
+    assert "do not require every calculation to have a catalog ID" in prompt
+    assert "Derived metrics" in prompt
+    assert "SELECT-only" in prompt
+    assert "Parameterize user-supplied literal" in prompt
 
 
 class FakeCompletions:

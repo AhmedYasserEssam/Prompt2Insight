@@ -149,7 +149,7 @@ class UnauthorizedColumnExecutor(QueryPlanExecutor):
     async def execute(self, **_: object):
         raise Prompt2InsightError(
             ErrorCode.UNAUTHORIZED_COLUMN,
-            "Sensitive columns are not queryable: analytics.sales.customer_id.",
+            "Unknown column: analytics.sales.fake_column.",
         )
 
 
@@ -440,7 +440,7 @@ async def test_execution_failure_preserves_real_planner_metadata() -> None:
         (
             UnauthorizedColumnExecutor(),
             ErrorCode.UNAUTHORIZED_COLUMN,
-            "Sensitive columns are not queryable: analytics.sales.customer_id.",
+            "Unknown column: analytics.sales.fake_column.",
         ),
         (UnauthorizedExecutor(), ErrorCode.UNAUTHORIZED_TABLE, "Unapproved tables: secret.sales."),
     ],

@@ -11,7 +11,6 @@ from app.infrastructure.sql.validator import SQLPolicy, SQLValidator
 def policy() -> SQLPolicy:
     return SQLPolicy(
         allowed_tables=frozenset({"analytics.orders"}),
-        prohibited_columns=frozenset({"password_hash"}),
         maximum_rows=100,
     )
 
@@ -71,10 +70,11 @@ def sales_policy() -> SQLPolicy:
             {
                 "analytics.sales.order_date",
                 "analytics.sales.sales",
+                "analytics.sales.region",
+                "analytics.sales.category",
                 "analytics.sales.customer_name",
             }
         ),
-        sensitive_columns=frozenset({"analytics.sales.customer_name"}),
         maximum_rows=100,
     )
 
@@ -109,6 +109,143 @@ def test_monthly_sales_order_by_output_alias_is_not_a_physical_column(
     )
 
 
+def test_monthly_sales_group_by_output_alias_is_not_a_physical_column(
+    sales_policy: SQLPolicy,
+) -> None:
+    result = SQLValidator().validate(
+        sql=(
+            "SELECT DATE_TRUNC('MONTH', analytics.sales.order_date) AS order_month, "
+            "SUM(analytics.sales.sales) AS total_sales FROM analytics.sales "
+            "GROUP BY order_month ORDER BY order_month"
+        ),
+        dialect=SQLDialect.POSTGRES,
+        policy=sales_policy,
+    )
+
+    assert result.referenced_columns == frozenset(
+        {"analytics.sales.order_date", "analytics.sales.sales"}
+    )
+
+
+def test_group_by_simple_projection_alias_is_not_a_physical_column(
+    sales_policy: SQLPolicy,
+) -> None:
+    result = SQLValidator().validate(
+        sql="SELECT analytics.sales.region AS r FROM analytics.sales GROUP BY r",
+        dialect=SQLDialect.POSTGRES,
+        policy=sales_policy,
+    )
+
+    assert result.referenced_columns == frozenset({"analytics.sales.region"})
+
+
+def test_mysql_group_by_simple_projection_alias_is_not_a_physical_column(
+    sales_policy: SQLPolicy,
+) -> None:
+    result = SQLValidator().validate(
+        sql="SELECT analytics.sales.region AS r FROM analytics.sales GROUP BY r",
+        dialect=SQLDialect.MYSQL,
+        policy=sales_policy,
+    )
+
+    assert result.referenced_columns == frozenset({"analytics.sales.region"})
+
+
+def test_group_by_unknown_alias_remains_an_unauthorized_column(sales_policy: SQLPolicy) -> None:
+    with pytest.raises(Prompt2InsightError) as captured:
+        SQLValidator().validate(
+            sql="SELECT analytics.sales.region FROM analytics.sales GROUP BY unknown_alias",
+            dialect=SQLDialect.POSTGRES,
+            policy=sales_policy,
+        )
+    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+
+
+def test_duplicate_group_by_alias_fails_closed(sales_policy: SQLPolicy) -> None:
+    with pytest.raises(Prompt2InsightError) as captured:
+        SQLValidator().validate(
+            sql=(
+                "SELECT analytics.sales.region AS value, analytics.sales.category AS value "
+                "FROM analytics.sales GROUP BY value"
+            ),
+            dialect=SQLDialect.POSTGRES,
+            policy=sales_policy,
+        )
+    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+
+
+def test_projection_alias_is_not_authorized_in_where(sales_policy: SQLPolicy) -> None:
+    with pytest.raises(Prompt2InsightError) as captured:
+        SQLValidator().validate(
+            sql=(
+                "SELECT analytics.sales.region AS r FROM analytics.sales "
+                "WHERE r = 'West'"
+            ),
+            dialect=SQLDialect.POSTGRES,
+            policy=sales_policy,
+        )
+    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+
+
+def test_projection_alias_is_not_authorized_in_having(sales_policy: SQLPolicy) -> None:
+    with pytest.raises(Prompt2InsightError) as captured:
+        SQLValidator().validate(
+            sql=(
+                "SELECT analytics.sales.region AS r FROM analytics.sales "
+                "GROUP BY analytics.sales.region HAVING r = 'West'"
+            ),
+            dialect=SQLDialect.POSTGRES,
+            policy=sales_policy,
+        )
+    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+
+
+def test_projection_alias_is_not_authorized_in_a_window_clause(
+    sales_policy: SQLPolicy,
+) -> None:
+    with pytest.raises(Prompt2InsightError) as captured:
+        SQLValidator().validate(
+            sql=(
+                "SELECT SUM(analytics.sales.sales) OVER (PARTITION BY r), "
+                "analytics.sales.region AS r FROM analytics.sales"
+            ),
+            dialect=SQLDialect.POSTGRES,
+            policy=sales_policy,
+        )
+    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+
+
+def test_inner_projection_alias_does_not_authorize_an_outer_reference(
+    sales_policy: SQLPolicy,
+) -> None:
+    with pytest.raises(Prompt2InsightError) as captured:
+        SQLValidator().validate(
+            sql=(
+                "SELECT analytics.sales.order_date FROM analytics.sales "
+                "WHERE order_month = (SELECT analytics.sales.order_date AS order_month "
+                "FROM analytics.sales)"
+            ),
+            dialect=SQLDialect.POSTGRES,
+            policy=sales_policy,
+        )
+    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+
+
+def test_group_by_alias_preserves_approved_underlying_column(
+    sales_policy: SQLPolicy,
+) -> None:
+    result = SQLValidator().validate(
+        sql=(
+            "SELECT analytics.sales.customer_name AS customer FROM analytics.sales "
+            "GROUP BY customer"
+        ),
+        dialect=SQLDialect.POSTGRES,
+        policy=sales_policy,
+    )
+
+    assert result.referenced_columns == frozenset({"analytics.sales.customer_name"})
+
+
 def test_unknown_order_by_alias_remains_an_unauthorized_column(sales_policy: SQLPolicy) -> None:
     with pytest.raises(Prompt2InsightError) as captured:
         SQLValidator().validate(
@@ -119,17 +256,17 @@ def test_unknown_order_by_alias_remains_an_unauthorized_column(sales_policy: SQL
     assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
 
 
-def test_alias_cannot_hide_sensitive_underlying_expression(sales_policy: SQLPolicy) -> None:
-    with pytest.raises(Prompt2InsightError) as captured:
-        SQLValidator().validate(
-            sql=(
-                "SELECT analytics.sales.customer_name AS customer FROM analytics.sales "
-                "ORDER BY customer"
-            ),
-            dialect=SQLDialect.POSTGRES,
-            policy=sales_policy,
-        )
-    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
+def test_order_alias_preserves_approved_underlying_column(sales_policy: SQLPolicy) -> None:
+    result = SQLValidator().validate(
+        sql=(
+            "SELECT analytics.sales.customer_name AS customer FROM analytics.sales "
+            "ORDER BY customer"
+        ),
+        dialect=SQLDialect.POSTGRES,
+        policy=sales_policy,
+    )
+
+    assert result.referenced_columns == frozenset({"analytics.sales.customer_name"})
 
 
 def test_duplicate_order_by_alias_fails_closed(sales_policy: SQLPolicy) -> None:

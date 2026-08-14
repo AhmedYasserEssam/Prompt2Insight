@@ -14,6 +14,8 @@ class ErrorCode(StrEnum):
     SQL_PARSE_FAILED = "sql_parse_failed"
     UNAUTHORIZED_TABLE = "unauthorized_table"
     UNAUTHORIZED_COLUMN = "unauthorized_column"
+    # Legacy-only values retained so persisted responses from the removed semantic
+    # policy architecture remain deserializable. New request paths do not raise them.
     UNDECLARED_JOIN = "undeclared_join"
     METRIC_POLICY_VIOLATION = "metric_policy_violation"
     PRIVACY_POLICY_VIOLATION = "privacy_policy_violation"

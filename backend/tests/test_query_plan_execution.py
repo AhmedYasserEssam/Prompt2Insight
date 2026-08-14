@@ -1,8 +1,4 @@
-from collections.abc import Callable
-from pathlib import Path
-
 import pytest
-from sqlglot import exp, parse_one
 
 from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.core.config import Settings
@@ -19,8 +15,6 @@ from app.domain.databases.models import (
     SQLDialect,
     TableMetadata,
 )
-from app.infrastructure.catalogs.loader import load_catalog
-from app.infrastructure.catalogs.models import AnalyticsCatalog, ColumnClassification
 from app.infrastructure.sql.validator import SQLValidator
 
 
@@ -36,10 +30,10 @@ def snapshot() -> SchemaSnapshot:
                 table_name="orders",
                 table_type="table",
                 columns=[
-                    ColumnMetadata(name=name, data_type="integer", nullable=False)
-                    for name in ("id", "customer_id")
-                ]
-                + [ColumnMetadata(name="region", data_type="text", nullable=True)],
+                    ColumnMetadata(name="id", data_type="integer", nullable=False),
+                    ColumnMetadata(name="customer_id", data_type="integer", nullable=False),
+                    ColumnMetadata(name="region", data_type="text", nullable=True),
+                ],
             ),
             TableMetadata(
                 schema_name="analytics",
@@ -54,17 +48,43 @@ def snapshot() -> SchemaSnapshot:
     )
 
 
+def sales_snapshot() -> SchemaSnapshot:
+    return SchemaSnapshot(
+        dialect=SQLDialect.POSTGRES,
+        database_name="analytics",
+        server_version="16",
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
+        tables=[
+            TableMetadata(
+                schema_name="analytics",
+                table_name="sales",
+                table_type="table",
+                columns=[
+                    ColumnMetadata(name="sales", data_type="numeric", nullable=False),
+                    ColumnMetadata(name="order_id", data_type="text", nullable=False),
+                    ColumnMetadata(name="order_date", data_type="timestamp", nullable=False),
+                    ColumnMetadata(name="product_name", data_type="text", nullable=False),
+                    ColumnMetadata(name="city", data_type="text", nullable=False),
+                    ColumnMetadata(name="customer_name", data_type="text", nullable=False),
+                ],
+            )
+        ],
+    )
+
+
 class Connector(SQLDatabaseConnector):
     dialect = SQLDialect.POSTGRES
 
-    def __init__(self, current: SchemaSnapshot) -> None:
+    def __init__(self, current: SchemaSnapshot, *, estimated_cost: float = 1) -> None:
         self.current = current
+        self.estimated_cost = estimated_cost
         self.explained = False
         self.executed = False
         self.explained_sql: str | None = None
         self.executed_sql: str | None = None
         self.explained_parameters: dict[str, object] | None = None
         self.executed_parameters: dict[str, object] | None = None
+        self.prepared_query: PreparedQuery | None = None
 
     async def get_schema_snapshot(self) -> SchemaSnapshot:
         return self.current
@@ -76,28 +96,35 @@ class Connector(SQLDatabaseConnector):
         self.explained = True
         self.explained_sql = query.sql
         self.explained_parameters = query.parameters
-        return ExplainResult(raw_plan={}, estimated_rows=1, estimated_cost=1)
+        self.prepared_query = query
+        return ExplainResult(raw_plan={}, estimated_rows=1, estimated_cost=self.estimated_cost)
 
     async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
         self.executed = True
         self.executed_sql = query.sql
         self.executed_parameters = query.parameters
         return QueryResult(
-            columns=["region", "revenue"], rows=[], row_count=0, truncated=False, duration_ms=1
+            columns=["value"], rows=[], row_count=0, truncated=False, duration_ms=1
         )
 
     async def close(self) -> None:
         return None
 
 
-def plan(sql: str, parameters: list[dict[str, object]] | None = None) -> QueryPlan:
+def plan(
+    sql: str,
+    parameters: list[dict[str, object]] | None = None,
+    *,
+    metric_ids: list[str] | None = None,
+    dimension_ids: list[str] | None = None,
+) -> QueryPlan:
     return QueryPlan(
         status="ready",
         response_language="en",
         database_dialect=SQLDialect.POSTGRES,
         interpretation="x",
-        metric_ids=["revenue"],
-        dimension_ids=["region"],
+        metric_ids=metric_ids if metric_ids is not None else ["revenue"],
+        dimension_ids=dimension_ids if dimension_ids is not None else ["region"],
         sql=sql,
         parameters=parameters or [],
     )
@@ -107,47 +134,45 @@ SAFE_SQL = (
     "SELECT analytics.orders.region, SUM(analytics.order_items.net_amount) "
     "FROM analytics.orders JOIN analytics.order_items "
     "ON analytics.orders.id = analytics.order_items.order_id "
-    "GROUP BY analytics.orders.region "
-    "HAVING COUNT(DISTINCT analytics.orders.customer_id) >= 5"
+    "GROUP BY analytics.orders.region"
 )
 
 
 async def test_schema_drift_stops_before_explain_and_execution() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
     planned = snapshot()
     changed = planned.model_copy(deep=True)
     changed.tables[0].columns.append(
         ColumnMetadata(name="new_column", data_type="text", nullable=True)
     )
     connector = Connector(changed)
+
     with pytest.raises(Prompt2InsightError) as captured:
         await QueryPlanExecutor().execute(
             plan=plan(SAFE_SQL),
-            catalog=catalog,
             schema_snapshot=planned,
             connector=connector,
             settings=Settings(),
         )
+
     assert captured.value.code is ErrorCode.SCHEMA_CHANGED
     assert not connector.explained and not connector.executed
 
 
-async def test_current_schema_allows_execution() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+async def test_valid_join_needs_no_semantic_contract() -> None:
     current = snapshot()
     connector = Connector(current)
+
     await QueryPlanExecutor().execute(
         plan=plan(SAFE_SQL),
-        catalog=catalog,
         schema_snapshot=current,
         connector=connector,
         settings=Settings(),
     )
+
     assert connector.explained and connector.executed
 
 
 async def test_scalar_parameters_reach_explain_and_execution_as_bindings() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
     current = snapshot()
     connector = Connector(current)
     filtered_sql = SAFE_SQL.replace(
@@ -156,7 +181,6 @@ async def test_scalar_parameters_reach_explain_and_execution_as_bindings() -> No
 
     await QueryPlanExecutor().execute(
         plan=plan(filtered_sql, [{"name": "region", "value": "West"}]),
-        catalog=catalog,
         schema_snapshot=current,
         connector=connector,
         settings=Settings(),
@@ -167,265 +191,98 @@ async def test_scalar_parameters_reach_explain_and_execution_as_bindings() -> No
 
 
 @pytest.mark.parametrize(
-    ("sql", "expected_predicates"),
+    ("sql", "metric_ids", "dimension_ids"),
     [
         (
-            SAFE_SQL.replace(" HAVING COUNT(DISTINCT analytics.orders.customer_id) >= 5", ""),
-            1,
+            "SELECT SUM(analytics.sales.sales) / "
+            "NULLIF(COUNT(DISTINCT analytics.sales.order_id), 0) AS average_order_total "
+            "FROM analytics.sales",
+            ["average_order_total"],
+            [],
         ),
-        (SAFE_SQL, 1),
-        (SAFE_SQL.replace(">= 5", ">= 10"), 1),
-        (SAFE_SQL.replace(">= 5", ">= 3"), 2),
         (
-            SAFE_SQL.replace(
-                "HAVING COUNT(DISTINCT analytics.orders.customer_id) >= 5",
-                "HAVING SUM(analytics.order_items.net_amount) > 1000",
-            ),
-            1,
+            "SELECT AVG(analytics.sales.sales) AS average_sale FROM analytics.sales",
+            ["revenue"],
+            [],
+        ),
+        (
+            "SELECT analytics.sales.product_name, SUM(analytics.sales.sales) AS total_sales "
+            "FROM analytics.sales GROUP BY analytics.sales.product_name",
+            ["revenue"],
+            ["product_name"],
         ),
     ],
 )
-async def test_grouped_queries_receive_one_effective_minimum_group_predicate(
-    sql: str, expected_predicates: int
+async def test_derived_canonical_mismatch_and_arbitrary_grouping_are_allowed(
+    sql: str, metric_ids: list[str], dimension_ids: list[str]
 ) -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
-    current = snapshot()
+    current = sales_snapshot()
     connector = Connector(current)
 
-    execution = await QueryPlanExecutor().execute(
-        plan=plan(sql),
-        catalog=catalog,
+    await QueryPlanExecutor().execute(
+        plan=plan(sql, metric_ids=metric_ids, dimension_ids=dimension_ids),
         schema_snapshot=current,
         connector=connector,
         settings=Settings(),
     )
 
-    tree = parse_one(execution.validated.normalized_sql, read="postgres")
-    predicates = list(tree.find_all(exp.GTE))
-    thresholds = [
-        predicate.expression.this
-        for predicate in predicates
-        if isinstance(predicate.this, exp.Count) and isinstance(predicate.this.this, exp.Distinct)
-    ]
-    assert len(thresholds) == expected_predicates
-    assert any(int(threshold) >= 5 for threshold in thresholds)
+    assert connector.explained and connector.executed
+
+
+async def test_small_groups_receive_no_automatic_privacy_having_clause() -> None:
+    current = sales_snapshot()
+    connector = Connector(current)
+    sql = (
+        "SELECT analytics.sales.city, SUM(analytics.sales.sales) AS total_sales "
+        "FROM analytics.sales GROUP BY analytics.sales.city"
+    )
+
+    execution = await QueryPlanExecutor().execute(
+        plan=plan(sql, dimension_ids=["city"]),
+        schema_snapshot=current,
+        connector=connector,
+        settings=Settings(),
+    )
+
+    assert "HAVING" not in execution.validated.normalized_sql.upper()
     assert connector.explained_sql == execution.validated.normalized_sql
     assert connector.executed_sql == execution.validated.normalized_sql
 
 
-async def test_grouped_alias_uses_the_query_alias_for_enforced_privacy() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
-    current = snapshot()
-    sql = SAFE_SQL.replace("analytics.orders", "o").replace(
-        "FROM o", "FROM analytics.orders AS o"
-    ).replace("analytics.order_items", "oi").replace(
-        "JOIN oi", "JOIN analytics.order_items AS oi"
-    ).replace("analytics.orders.id", "o.id")
-    sql = sql.replace("HAVING COUNT(DISTINCT o.customer_id) >= 5", "")
-    execution = await QueryPlanExecutor().execute(
-        plan=plan(sql),
-        catalog=catalog,
-        schema_snapshot=current,
-        connector=Connector(current),
-        settings=Settings(),
-    )
-
-    assert "COUNT(DISTINCT o.customer_id) >= 5" in execution.validated.normalized_sql
-
-
-def test_privacy_verification_rejects_where_and_unrelated_subquery_predicates() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
-    wrong_where = SAFE_SQL.replace(
-        " HAVING COUNT(DISTINCT analytics.orders.customer_id) >= 5",
-        " WHERE analytics.orders.customer_id >= 5",
-    )
-    unrelated_subquery = SAFE_SQL.replace(
-        " HAVING COUNT(DISTINCT analytics.orders.customer_id) >= 5",
-        " HAVING 1 < (SELECT COUNT(DISTINCT analytics.orders.customer_id) FROM analytics.orders)",
-    )
-
-    for sql in (wrong_where, unrelated_subquery):
-        with pytest.raises(Prompt2InsightError) as captured:
-            QueryPlanExecutor._validate_privacy(sql, catalog, SQLDialect.POSTGRES, plan(sql))
-        assert captured.value.code is ErrorCode.PRIVACY_POLICY_VIOLATION
-
-
-def test_privacy_enforcement_skips_non_grouped_metric_or_dimension_requests() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
-    sql = "SELECT SUM(analytics.order_items.net_amount) FROM analytics.order_items"
-    metric_only = plan(sql)
-    metric_only.dimension_ids = []
-    dimension_only = plan("SELECT analytics.orders.region FROM analytics.orders")
-    dimension_only.metric_ids = []
-
-    assert QueryPlanExecutor._enforce_privacy(metric_only, catalog, SQLDialect.POSTGRES) == sql
-    assert (
-        QueryPlanExecutor._enforce_privacy(dimension_only, catalog, SQLDialect.POSTGRES)
-        == dimension_only.sql
-    )
-
-
-def test_cte_privacy_enforcement_targets_the_grouped_sales_query_block() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
-    catalog = catalog.model_copy(deep=True)
-    catalog.metrics["revenue"].expressions.postgres = "SUM(analytics.sales.sales)"
-    catalog.dimensions["region"].expressions.postgres = (
-        "DATE_TRUNC('month', analytics.sales.order_date)"
-    )
-    catalog.privacy.privacy_unit = "analytics.sales.customer_id"
-    grouped = (
-        "WITH monthly_sales AS ("
-        "SELECT DATE_TRUNC('month', s.order_date) AS month, SUM(s.sales) AS total "
-        "FROM analytics.sales AS s GROUP BY DATE_TRUNC('month', s.order_date)"
-        ") SELECT monthly_sales.month, monthly_sales.total FROM monthly_sales"
-    )
-    candidate = plan(grouped)
-
-    effective = QueryPlanExecutor._enforce_privacy(candidate, catalog, SQLDialect.POSTGRES)
-
-    tree = parse_one(effective, read="postgres")
-    grouped_select = next(
-        select for select in tree.find_all(exp.Select) if select.args.get("group")
-    )
-    assert grouped_select.args["having"].sql(dialect="postgres") == (
-        "HAVING COUNT(DISTINCT s.customer_id) >= 5"
-    )
-    QueryPlanExecutor._validate_privacy(effective, catalog, SQLDialect.POSTGRES, candidate)
-
-
-async def test_sales_month_query_executes_with_enforced_privacy_suppression() -> None:
-    catalog, current = sales_catalog_and_snapshot()
-    candidate = plan(
-        "SELECT DATE_TRUNC('month', analytics.sales.order_date) AS order_month, "
-        "SUM(analytics.sales.sales) AS total_sales FROM analytics.sales "
-        "GROUP BY DATE_TRUNC('month', analytics.sales.order_date) ORDER BY order_month"
-    )
+async def test_approved_column_is_queryable_regardless_of_old_sensitive_classification() -> None:
+    current = sales_snapshot()
     connector = Connector(current)
 
-    execution = await QueryPlanExecutor().execute(
-        plan=candidate,
-        catalog=catalog,
+    await QueryPlanExecutor().execute(
+        plan=plan(
+            "SELECT analytics.sales.customer_name FROM analytics.sales",
+            metric_ids=[],
+            dimension_ids=["customer_name"],
+        ),
         schema_snapshot=current,
         connector=connector,
         settings=Settings(),
     )
 
-    assert "COUNT(DISTINCT analytics.sales.customer_id) >= 5" in execution.validated.normalized_sql
-    assert "ORDER BY order_month" in execution.validated.normalized_sql
-    assert connector.explained and connector.executed
-
-
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "SELECT analytics.sales.customer_id, DATE_TRUNC('month', analytics.sales.order_date), "
-        "SUM(analytics.sales.sales) FROM analytics.sales "
-        "GROUP BY analytics.sales.customer_id, DATE_TRUNC('month', analytics.sales.order_date)",
-        "SELECT DATE_TRUNC('month', analytics.sales.order_date), SUM(analytics.sales.sales) "
-        "FROM analytics.sales WHERE analytics.sales.customer_id = 1 "
-        "GROUP BY DATE_TRUNC('month', analytics.sales.order_date)",
-    ],
-)
-async def test_planner_sensitive_privacy_unit_is_rejected_before_injection(sql: str) -> None:
-    catalog, current = sales_catalog_and_snapshot()
-    connector = Connector(current)
-
-    with pytest.raises(Prompt2InsightError) as captured:
-        await QueryPlanExecutor().execute(
-            plan=plan(sql),
-            catalog=catalog,
-            schema_snapshot=current,
-            connector=connector,
-            settings=Settings(),
-        )
-
-    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
-    assert not connector.explained and not connector.executed
-
-
-@pytest.mark.parametrize("column", ["customer_name", "internal_note"])
-async def test_other_sensitive_and_prohibited_columns_remain_forbidden(column: str) -> None:
-    catalog, current = sales_catalog_and_snapshot()
-    candidate = plan(
-        "SELECT DATE_TRUNC('month', analytics.sales.order_date), SUM(analytics.sales.sales) "
-        f"FROM analytics.sales WHERE analytics.sales.{column} = 'x' "
-        "GROUP BY DATE_TRUNC('month', analytics.sales.order_date)"
-    )
-
-    with pytest.raises(Prompt2InsightError) as captured:
-        await QueryPlanExecutor().execute(
-            plan=candidate,
-            catalog=catalog,
-            schema_snapshot=current,
-            connector=Connector(current),
-            settings=Settings(),
-        )
-
-    assert captured.value.code is ErrorCode.UNAUTHORIZED_COLUMN
-
-
-def test_final_policy_exempts_only_the_catalog_privacy_unit() -> None:
-    catalog, current = sales_catalog_and_snapshot()
-    strict = QueryPlanExecutor._policy(catalog, current, Settings())
-    final = QueryPlanExecutor._final_policy(strict, catalog)
-
-    assert "analytics.sales.customer_id" in strict.sensitive_columns
-    assert "analytics.sales.customer_id" not in final.sensitive_columns
-    assert "analytics.sales.customer_name" in final.sensitive_columns
-    assert "analytics.sales.internal_note" in final.prohibited_columns
-
-
-def sales_catalog_and_snapshot() -> tuple[AnalyticsCatalog, SchemaSnapshot]:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
-    catalog = catalog.model_copy(deep=True)
-    catalog.metrics["revenue"].expressions.postgres = "SUM(analytics.sales.sales)"
-    catalog.dimensions["region"].expressions.postgres = (
-        "DATE_TRUNC('month', analytics.sales.order_date)"
-    )
-    catalog.privacy.privacy_unit = "analytics.sales.customer_id"
-    catalog.column_policies = {
-        "analytics.sales.customer_id": ColumnClassification.SENSITIVE,
-        "analytics.sales.customer_name": ColumnClassification.SENSITIVE,
-        "analytics.sales.internal_note": ColumnClassification.PROHIBITED,
-    }
-    return catalog, SchemaSnapshot(
-        dialect=SQLDialect.POSTGRES,
-        database_name="analytics",
-        server_version="16",
-        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
-        tables=[
-            TableMetadata(
-                schema_name="analytics",
-                table_name="sales",
-                table_type="table",
-                columns=[
-                    ColumnMetadata(name="sales", data_type="numeric", nullable=False),
-                    ColumnMetadata(name="order_date", data_type="timestamp", nullable=False),
-                    ColumnMetadata(name="customer_id", data_type="integer", nullable=False),
-                    ColumnMetadata(name="customer_name", data_type="text", nullable=False),
-                    ColumnMetadata(name="internal_note", data_type="text", nullable=True),
-                ],
-            )
-        ],
-    )
+    assert connector.executed
 
 
 def test_schema_qualified_sources_are_exact_and_ctes_are_excluded() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
-    policy = QueryPlanExecutor._policy(catalog, snapshot(), Settings())
+    current = snapshot()
+    policy = QueryPlanExecutor._policy(current, Settings())
     validator = SQLValidator()
 
     accepted = validator.validate(
         sql=(
-            "WITH monthly_sales AS (SELECT analytics.orders.id FROM analytics.orders AS o) "
-            "SELECT id FROM monthly_sales"
+            "WITH selected_orders AS (SELECT analytics.orders.id FROM analytics.orders AS o) "
+            "SELECT id FROM selected_orders"
         ),
         dialect=SQLDialect.POSTGRES,
         policy=policy,
     )
     assert accepted.referenced_tables == frozenset({"analytics.orders"})
 
-    for source in ("private.orders", "unknown.orders"):
+    for source in ("private.orders", "pg_catalog.pg_tables", "information_schema.tables"):
         with pytest.raises(Prompt2InsightError) as captured:
             validator.validate(
                 sql=f"SELECT id FROM {source}",
@@ -435,184 +292,45 @@ def test_schema_qualified_sources_are_exact_and_ctes_are_excluded() -> None:
         assert captured.value.code is ErrorCode.UNAUTHORIZED_TABLE
 
 
-def test_policy_intersects_canonical_catalog_and_snapshot_tables() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+def test_policy_uses_all_tables_and_columns_from_approved_snapshot() -> None:
+    policy = QueryPlanExecutor._policy(snapshot(), Settings())
 
-    policy = QueryPlanExecutor._policy(catalog, snapshot(), Settings())
-
-    assert policy.allowed_tables == frozenset({"analytics.orders", "analytics.order_items"})
-
-
-def test_catalog_tables_preserve_unqualified_column_references() -> None:
-    catalog = AnalyticsCatalog.model_validate(
-        {
-            "catalog_version": "test",
-            "metrics": {},
-            "dimensions": {},
-            "join_contracts": [],
-            "column_policies": {"sales.sales": "non_sensitive"},
-            "privacy": {"privacy_unit": "sales.customer_id", "minimum_group_size": 1},
-        }
+    assert policy.allowed_tables == frozenset(
+        {"analytics.orders", "analytics.order_items"}
     )
-
-    assert QueryPlanExecutor._catalog_tables(catalog, SQLDialect.POSTGRES) == {"sales"}
-
-
-def test_catalog_tables_preserve_schema_qualified_column_references() -> None:
-    catalog = AnalyticsCatalog.model_validate(
-        {
-            "catalog_version": "test",
-            "metrics": {},
-            "dimensions": {},
-            "join_contracts": [],
-            "column_policies": {"analytics.sales.sales": "non_sensitive"},
-            "privacy": {"privacy_unit": "analytics.sales.customer_id", "minimum_group_size": 1},
-        }
-    )
-
-    assert QueryPlanExecutor._catalog_tables(catalog, SQLDialect.POSTGRES) == {
-        "analytics.sales"
-    }
+    assert "analytics.orders.customer_id" in policy.allowed_columns
 
 
-def test_policy_allows_exact_schema_qualified_postgres_catalog_table() -> None:
-    catalog = AnalyticsCatalog.model_validate(
-        {
-            "catalog_version": "test",
-            "metrics": {
-                "sales": {
-                    "labels": {"en": "Sales", "ar": "Sales"},
-                    "aliases": {"en": [], "ar": []},
-                    "descriptions": {"en": "", "ar": ""},
-                    "expressions": {
-                        "postgres": "SUM(analytics.sales.sales)",
-                        "mysql": "SUM(sales.sales)",
-                    },
-                    "allowed_dimensions": [],
-                }
-            },
-            "dimensions": {},
-            "join_contracts": [],
-            "column_policies": {"analytics.sales.customer_id": "sensitive"},
-            "privacy": {
-                "privacy_unit": "analytics.sales.customer_id",
-                "minimum_group_size": 1,
-            },
-        }
-    )
-    sales_snapshot = SchemaSnapshot(
-        dialect=SQLDialect.POSTGRES,
-        database_name="analytics",
-        server_version="16",
-        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
-        tables=[
-            TableMetadata(
-                schema_name="analytics",
-                table_name="sales",
-                table_type="table",
-                columns=[
-                    ColumnMetadata(name="sales", data_type="numeric", nullable=False),
-                    ColumnMetadata(name="customer_id", data_type="integer", nullable=False),
-                ],
-            )
-        ],
-    )
-
-    policy = QueryPlanExecutor._policy(catalog, sales_snapshot, Settings())
-
-    assert policy.allowed_tables == frozenset({"analytics.sales"})
-
-
-def test_policy_allows_exact_unqualified_mysql_catalog_table() -> None:
-    catalog = AnalyticsCatalog.model_validate(
-        {
-            "catalog_version": "test",
-            "metrics": {},
-            "dimensions": {},
-            "join_contracts": [],
-            "column_policies": {"sales.amount": "non_sensitive"},
-            "privacy": {"privacy_unit": "sales.id", "minimum_group_size": 1},
-        }
-    )
-    sales_snapshot = SchemaSnapshot(
-        dialect=SQLDialect.MYSQL,
-        database_name="analytics",
-        server_version="8",
-        capabilities=DatabaseCapabilities(dialect=SQLDialect.MYSQL, server_version="8"),
-        tables=[
-            TableMetadata(
-                schema_name=None,
-                table_name="sales",
-                table_type="table",
-                columns=[
-                    ColumnMetadata(name="amount", data_type="numeric", nullable=False),
-                    ColumnMetadata(name="id", data_type="integer", nullable=False),
-                ],
-            )
-        ],
-    )
-
-    policy = QueryPlanExecutor._policy(catalog, sales_snapshot, Settings())
-
-    assert policy.allowed_tables == frozenset({"sales"})
-
-
-@pytest.mark.parametrize(
-    ("mutate", "code"),
-    [
-        (lambda value: value.__setattr__("metric_ids", ["unknown"]), ErrorCode.METRIC_UNDEFINED),
-        (lambda value: value.__setattr__("dimension_ids", ["unknown"]), ErrorCode.METRIC_UNDEFINED),
-        (
-            lambda value: value.__setattr__("dimension_ids", ["product_category"]),
-            ErrorCode.METRIC_POLICY_VIOLATION,
-        ),
-        (
-            lambda value: value.__setattr__(
-                "sql",
-                SAFE_SQL.replace(
-                    "SUM(analytics.order_items.net_amount)", "AVG(analytics.order_items.net_amount)"
-                ),
-            ),
-            ErrorCode.METRIC_POLICY_VIOLATION,
-        ),
-    ],
-)
-async def test_semantic_and_privacy_policy_rejects_invalid_plan(
-    mutate: Callable[[QueryPlan], None], code: ErrorCode
-) -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+async def test_cost_guard_runs_before_execution() -> None:
     current = snapshot()
-    candidate = plan(SAFE_SQL)
-    mutate(candidate)
-    connector = Connector(current)
+    connector = Connector(current, estimated_cost=200_000)
+
     with pytest.raises(Prompt2InsightError) as captured:
         await QueryPlanExecutor().execute(
-            plan=candidate,
-            catalog=catalog,
+            plan=plan(SAFE_SQL),
             schema_snapshot=current,
             connector=connector,
-            settings=Settings(),
+            settings=Settings(max_query_cost=100_000),
         )
-    assert captured.value.code is code
-    assert not connector.explained and not connector.executed
+
+    assert captured.value.code is ErrorCode.QUERY_TOO_EXPENSIVE
+    assert connector.explained and not connector.executed
 
 
-async def test_connector_row_bound_and_truncation_metadata() -> None:
-    catalog, _ = load_catalog(Path(__file__).parents[2] / "catalogs/analytics_catalog.example.yaml")
+async def test_row_timeout_and_lock_bounds_reach_read_only_connector() -> None:
     current = snapshot()
+    connector = Connector(current)
+    settings = Settings(max_output_rows=2, query_timeout_ms=8_000, lock_timeout_ms=2_000)
 
-    class TruncatingConnector(Connector):
-        async def execute_read_only(self, query: PreparedQuery) -> QueryResult:
-            return QueryResult(
-                columns=["region"], rows=[["x"]] * 2, row_count=2, truncated=True, duration_ms=1
-            )
-
-    result = await QueryPlanExecutor().execute(
+    execution = await QueryPlanExecutor().execute(
         plan=plan(SAFE_SQL),
-        catalog=catalog,
         schema_snapshot=current,
-        connector=TruncatingConnector(current),
-        settings=Settings(max_output_rows=2),
+        connector=connector,
+        settings=settings,
     )
-    assert result.result.row_count <= 2
-    assert result.result.truncated
+
+    assert "LIMIT 2" in execution.validated.normalized_sql
+    assert connector.prepared_query is not None
+    assert connector.prepared_query.maximum_rows == 2
+    assert connector.prepared_query.timeout_ms == 8_000
+    assert connector.prepared_query.lock_timeout_ms == 2_000

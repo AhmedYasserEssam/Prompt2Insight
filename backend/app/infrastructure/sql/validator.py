@@ -5,77 +5,51 @@ from sqlglot.errors import ParseError
 
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import SQLDialect
-from app.infrastructure.catalogs.models import AnalyticsCatalog, ColumnClassification
+
+DANGEROUS_FUNCTIONS = frozenset(
+    {
+        "benchmark",
+        "dblink",
+        "dblink_exec",
+        "load_file",
+        "lo_export",
+        "lo_import",
+        "pg_advisory_lock",
+        "pg_advisory_lock_shared",
+        "pg_cancel_backend",
+        "pg_create_restore_point",
+        "pg_file_rename",
+        "pg_file_unlink",
+        "pg_file_write",
+        "pg_log_backend_memory_contexts",
+        "pg_ls_dir",
+        "pg_notify",
+        "pg_promote",
+        "pg_read_binary_file",
+        "pg_read_file",
+        "pg_reload_conf",
+        "pg_rotate_logfile",
+        "pg_sleep",
+        "pg_stat_file",
+        "pg_terminate_backend",
+        "pg_try_advisory_lock",
+        "pg_try_advisory_lock_shared",
+        "set_config",
+        "sleep",
+        "sys_eval",
+        "sys_exec",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
 class SQLPolicy:
     allowed_tables: frozenset[str]
     allowed_columns: frozenset[str] = frozenset()
-    prohibited_columns: frozenset[str] = frozenset()
-    sensitive_columns: frozenset[str] = frozenset()
-    prohibited_functions: frozenset[str] = frozenset(
-        {"pg_sleep", "sleep", "benchmark", "load_file"}
-    )
+    prohibited_functions: frozenset[str] = DANGEROUS_FUNCTIONS
     maximum_joins: int = 6
     maximum_rows: int = 1000
     allow_select_star: bool = False
-    allowed_joins: frozenset[tuple[str, str, str]] = frozenset()
-    allowed_functions: frozenset[str] = frozenset(
-        {
-            "abs",
-            "avg",
-            "cast",
-            "coalesce",
-            "concat",
-            "count",
-            "date_format",
-            "date_trunc",
-            "extract",
-            "lower",
-            "max",
-            "min",
-            "nullif",
-            "round",
-            "sum",
-            "timestamp_trunc",
-            "upper",
-        }
-    )
-
-    @classmethod
-    def from_catalog(
-        cls,
-        *,
-        catalog: AnalyticsCatalog,
-        allowed_tables: frozenset[str],
-        prohibited_functions: frozenset[str] = frozenset(
-            {"pg_sleep", "sleep", "benchmark", "load_file"}
-        ),
-        maximum_joins: int = 6,
-        maximum_rows: int = 1000,
-        allow_select_star: bool = False,
-    ) -> "SQLPolicy":
-        prohibited_columns = frozenset(
-            column
-            for column, classification in catalog.column_policies.items()
-            if classification is ColumnClassification.PROHIBITED
-        )
-        sensitive_columns = frozenset(
-            column
-            for column, classification in catalog.column_policies.items()
-            if classification is ColumnClassification.SENSITIVE
-        )
-        return cls(
-            allowed_tables=allowed_tables,
-            prohibited_columns=prohibited_columns,
-            sensitive_columns=sensitive_columns,
-            prohibited_functions=prohibited_functions,
-            maximum_joins=maximum_joins,
-            maximum_rows=maximum_rows,
-            allow_select_star=allow_select_star,
-            allowed_joins=catalog.sql_join_contracts(),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,21 +122,9 @@ class SQLValidator:
                 f"Unapproved tables: {', '.join(sorted(unknown_tables))}.",
             )
 
-        self._validate_joins(tree, joins, policy.allowed_joins)
-
-        columns = self._canonical_columns(tree, policy.allowed_columns, cte_names)
-        prohibited = {column for column in columns if column in policy.prohibited_columns}
-        if prohibited:
-            raise Prompt2InsightError(
-                ErrorCode.UNAUTHORIZED_COLUMN,
-                f"Prohibited columns: {', '.join(sorted(prohibited))}.",
-            )
-        sensitive = {column for column in columns if column in policy.sensitive_columns}
-        if sensitive:
-            raise Prompt2InsightError(
-                ErrorCode.UNAUTHORIZED_COLUMN,
-                f"Sensitive columns are not queryable: {', '.join(sorted(sensitive))}.",
-            )
+        columns = self._canonical_columns(
+            tree, policy.allowed_columns, cte_names, dialect
+        )
 
         functions = {
             name
@@ -170,10 +132,9 @@ class SQLValidator:
             if (name := self._function_name(function)) is not None
         }
         blocked = functions & policy.prohibited_functions
-        unknown_functions = functions - policy.allowed_functions
-        if blocked or unknown_functions:
+        if blocked:
             raise self._reject(
-                f"Unapproved functions: {', '.join(sorted(blocked | unknown_functions))}."
+                f"Dangerous functions are not allowed: {', '.join(sorted(blocked))}."
             )
 
         self._enforce_limit(tree, policy.maximum_rows)
@@ -208,13 +169,14 @@ class SQLValidator:
         tree: exp.Query,
         allowed_columns: frozenset[str],
         cte_names: set[str],
+        dialect: SQLDialect,
     ) -> frozenset[str]:
         aliases = {
             table.alias_or_name: self._table_name(table) for table in tree.find_all(exp.Table)
         }
         columns: set[str] = set()
         for column in tree.find_all(exp.Column):
-            if self._is_order_projection_alias(column):
+            if self._is_valid_projection_alias_reference(column, dialect):
                 continue
             if column.table:
                 if column.table in cte_names:
@@ -239,14 +201,31 @@ class SQLValidator:
         return frozenset(columns)
 
     @staticmethod
-    def _is_order_projection_alias(column: exp.Column) -> bool:
-        """Allow an unqualified output alias only as its SELECT block's ORDER BY key."""
-        if column.table or column.db or not isinstance(column.parent, exp.Ordered):
+    def _is_valid_projection_alias_reference(
+        column: exp.Column, dialect: SQLDialect
+    ) -> bool:
+        """Allow unique output aliases in this SELECT block's supported alias contexts."""
+        if column.table or column.db or dialect not in {
+            SQLDialect.POSTGRES,
+            SQLDialect.MYSQL,
+        }:
             return False
-        order = column.find_ancestor(exp.Order)
+
         select = column.find_ancestor(exp.Select)
-        if order is None or select is None or order.find_ancestor(exp.Select) is not select:
+        if select is None:
             return False
+
+        context: str | None = None
+        if isinstance(column.parent, exp.Ordered):
+            order = column.parent.parent
+            if isinstance(order, exp.Order) and select.args.get("order") is order:
+                context = "ORDER BY"
+        elif isinstance(column.parent, exp.Group) and select.args.get("group") is column.parent:
+            context = "GROUP BY"
+
+        if context is None:
+            return False
+
         aliases = [
             projection.alias
             for projection in select.expressions
@@ -255,7 +234,7 @@ class SQLValidator:
         if len(aliases) > 1:
             raise Prompt2InsightError(
                 ErrorCode.UNAUTHORIZED_COLUMN,
-                f"ORDER BY alias is ambiguous: {column.name}.",
+                f"{context} alias is ambiguous: {column.name}.",
             )
         return len(aliases) == 1
 
@@ -263,56 +242,10 @@ class SQLValidator:
     def _function_name(function: exp.Func) -> str | None:
         if isinstance(function, (exp.And, exp.Or, exp.Not)):
             return None
+        if isinstance(function, exp.Anonymous):
+            return function.name.lower()
         name = function.sql_name()  # type: ignore[no-untyped-call]
         return name.lower() if name else None
-
-    def _validate_joins(
-        self,
-        tree: exp.Query,
-        joins: list[exp.Join],
-        allowed_joins: frozenset[tuple[str, str, str]],
-    ) -> None:
-        if not joins:
-            return
-
-        table_aliases = {
-            table.alias_or_name: self._table_name(table) for table in tree.find_all(exp.Table)
-        }
-        for join in joins:
-            join_type = (join.args.get("side") or join.args.get("kind") or "inner").lower()
-            if join_type not in {"inner", "left"} or join.args.get("method") == "NATURAL":
-                raise self._reject("Only declared INNER and LEFT joins are allowed.")
-            on = join.args.get("on")
-            if not isinstance(on, exp.EQ):
-                raise self._reject("Joins must use one declared equality condition.")
-
-            left = self._qualified_join_column(on.this, table_aliases)
-            right = self._qualified_join_column(on.expression, table_aliases)
-            if left is None or right is None:
-                raise self._reject("Join columns must be qualified.")
-
-            contract = (left, right, join_type)
-            reverse_contract = (right, left, join_type)
-            if contract not in allowed_joins and reverse_contract not in allowed_joins:
-                raise Prompt2InsightError(
-                    ErrorCode.UNDECLARED_JOIN, f"Undeclared join: {left} {join_type} {right}."
-                )
-
-    @staticmethod
-    def _qualified_join_column(
-        expression: exp.Expression,
-        table_aliases: dict[str, str],
-    ) -> str | None:
-        if not isinstance(expression, exp.Column) or not expression.table:
-            return None
-        table_name: str | None
-        if expression.db:
-            table_name = ".".join((expression.db, expression.table))
-        else:
-            table_name = table_aliases.get(expression.table)
-        if table_name is None:
-            return None
-        return f"{table_name}.{expression.name}"
 
     @staticmethod
     def _enforce_limit(tree: exp.Query, maximum_rows: int) -> None:

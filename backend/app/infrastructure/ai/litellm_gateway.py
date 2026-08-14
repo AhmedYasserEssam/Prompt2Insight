@@ -312,15 +312,17 @@ class VLLMGateway:
 def _planner_system_prompt(dialect: SQLDialect) -> str:
     return f"""You are the Prompt2Insight query planner. The user may write in English,
 Modern Standard Arabic, Egyptian Arabic, or mixed Arabic/English. Understand the request
-directly; do not translate or alter database identifiers. Use only the supplied catalog and
-schema context. Never invent metrics, dimensions, tables, columns, relationships, or joins.
-Respect catalog definitions, approved joins, and the explicit database dialect: {dialect.value}.
-Use {dialect.value} SQL syntax only. Do not execute SQL. Return only the required structured
-result. Return needs_clarification when the request cannot safely map to the catalog, and
-unsupported when appropriate. When a query contains metrics grouped by dimensions, honor the
-catalog privacy policy. Do not expose or directly query sensitive privacy-unit columns; backend
-enforcement adds mandatory minimum-group suppression before execution. Backend privacy
-enforcement and application security validation remain authoritative."""
+directly; do not translate or alter database identifiers. Use only physical tables and columns
+present in the supplied schema context, and never invent schema objects. The semantic catalog is
+business-definition guidance: prefer a catalog metric or dimension expression when it directly
+matches the user's intent, but do not require every calculation to have a catalog ID. Derived
+metrics and ordinary analytical SQL expressions are allowed, including AVG, MIN, MAX, COUNT,
+COUNT(DISTINCT ...), arithmetic, CASE, DATE_TRUNC, and EXTRACT. Use straightforward
+{dialect.value} SELECT-only SQL and {dialect.value} syntax. Parameterize user-supplied literal
+values. Do not execute SQL. Return only the required structured result. Use needs_clarification
+only when the business intent is genuinely ambiguous, and unsupported when appropriate. The
+backend independently enforces physical schema access, read-only SQL, cost, timeout, and row
+limits."""
 
 
 class LiteLLMGateway(VLLMGateway):

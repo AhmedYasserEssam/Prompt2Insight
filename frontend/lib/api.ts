@@ -50,7 +50,7 @@ export type SchemaRefreshResult = {
 };
 
 export type SchemaSnapshot = {dialect: "postgres" | "mysql"; database_name: string; tables: {schema_name: string | null; table_name: string; table_type: string; columns: {name: string; data_type: string; nullable: boolean}[]}[]};
-export type Catalog = {catalog_version: string; metrics: Record<string, Definition & {allowed_dimensions: string[]}>; dimensions: Record<string, Definition>; join_contracts: {left: string; right: string; relationship: string; allowed_types: string[]}[]; column_policies: Record<string, "non_sensitive" | "sensitive" | "prohibited">; privacy: {privacy_unit: string; minimum_group_size: number}};
+export type Catalog = {catalog_version: string; metrics: Record<string, Definition>; dimensions: Record<string, Definition>};
 type Definition = {labels: {en: string; ar: string}; aliases: {en: string[]; ar: string[]}; descriptions: {en: string; ar: string}; expressions: {postgres: string; mysql: string}};
 export type CatalogStatus = {catalog: Catalog | null; schema_snapshot: SchemaSnapshot; state: string; content_hash?: string | null};
 export type CatalogValidationResult = {valid: boolean; errors: string[]};

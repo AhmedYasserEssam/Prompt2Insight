@@ -20,16 +20,27 @@ Starter repository for a bilingual English/Arabic business-intelligence assistan
 ```text
 Question
   -> language resolution
-  -> bilingual semantic catalog
-  -> structured query plan
-  -> SQLGlot validation
+  -> schema plus bilingual business glossary context
+  -> structured LLM query plan
+  -> basic SQL safety validation
   -> database-specific EXPLAIN
   -> cost guard
   -> read-only execution
   -> grounded answer and validated chart
 ```
 
-The LLM never receives database credentials and never executes SQL directly.
+The semantic catalog supplies business-definition guidance, preferred metric and dimension
+expressions, descriptions, and English/Arabic terminology and aliases. It is planning context,
+not a hard metric authorization engine, metric/dimension ACL, join authorization layer, or
+privacy aggregation policy engine. Derived analytical expressions are allowed when they use
+physical schema objects supplied to the planner.
+
+The security seam is the database and SQL layer: dedicated read-only credentials and
+transactions, SELECT/SELECT-CTE-only single statements, introspected approved schemas and tables,
+physical column-existence checks, dangerous SQL/function restrictions, bounded output,
+statement and lock timeouts, and EXPLAIN cost control. Answer numeric/date/entity grounding and
+chart-column grounding remain separate post-execution checks. The LLM never receives database
+credentials and never executes SQL directly.
 
 ## Start the project
 

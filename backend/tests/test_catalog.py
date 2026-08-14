@@ -5,7 +5,6 @@ import pytest
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import SQLDialect
 from app.infrastructure.catalogs.loader import load_catalog
-from app.infrastructure.sql.validator import SQLPolicy, SQLValidator
 
 CATALOG_PATH = Path(__file__).parents[2] / "catalogs" / "analytics_catalog.example.yaml"
 
@@ -32,47 +31,28 @@ def test_catalog_returns_only_declared_metric_expressions(catalog) -> None:
     assert captured.value.code is ErrorCode.METRIC_UNDEFINED
 
 
-def test_catalog_rejects_invalid_metric_dimension_combinations(catalog) -> None:
-    with pytest.raises(Prompt2InsightError):
-        catalog.validate_metric_dimensions(["revenue"], ["unknown_dimension"])
-
-
 def test_catalog_hash_identifies_the_loaded_revision() -> None:
     _, revision_hash = load_catalog(CATALOG_PATH)
     assert len(revision_hash) == 64
     assert revision_hash == load_catalog(CATALOG_PATH)[1]
 
 
-def test_catalog_policy_rejects_undeclared_joins(catalog) -> None:
-    policy = SQLPolicy.from_catalog(
-        catalog=catalog,
-        allowed_tables=frozenset(
-            {"analytics.order_items", "analytics.orders", "analytics.products"}
-        ),
-    )
-    validator = SQLValidator()
+def test_legacy_policy_metadata_is_accepted_but_not_part_of_current_catalog() -> None:
+    from app.infrastructure.catalogs.models import AnalyticsCatalog
 
-    validator.validate(
-        sql=(
-            "SELECT oi.order_id FROM analytics.order_items oi "
-            "JOIN analytics.orders o ON oi.order_id = o.id"
-        ),
-        dialect=SQLDialect.POSTGRES,
-        policy=policy,
+    catalog = AnalyticsCatalog.model_validate(
+        {
+            "catalog_version": "legacy",
+            "metrics": {},
+            "dimensions": {},
+            "join_contracts": [{"left": "x.a", "right": "y.a"}],
+            "column_policies": {"x.secret": "sensitive"},
+            "privacy": {"privacy_unit": "x.id", "minimum_group_size": 5},
+        }
     )
 
-    with pytest.raises(Prompt2InsightError) as captured:
-        validator.validate(
-            sql=(
-                "SELECT oi.order_id FROM analytics.order_items oi "
-                "JOIN analytics.products p ON oi.order_id = p.id"
-            ),
-            dialect=SQLDialect.POSTGRES,
-            policy=policy,
-        )
-    assert captured.value.code is ErrorCode.UNDECLARED_JOIN
-
-
-def test_privacy_rule_suppresses_small_groups(catalog) -> None:
-    assert catalog.privacy.suppresses(4)
-    assert not catalog.privacy.suppresses(5)
+    assert catalog.model_dump() == {
+        "catalog_version": "legacy",
+        "metrics": {},
+        "dimensions": {},
+    }

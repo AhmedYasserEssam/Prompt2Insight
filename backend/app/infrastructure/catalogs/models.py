@@ -1,7 +1,4 @@
-from collections.abc import Iterable
-from enum import StrEnum
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import SQLDialect
@@ -31,7 +28,6 @@ class MetricDefinition(BaseModel):
     aliases: LocalizedAliases
     descriptions: LocalizedText
     expressions: DialectExpressions
-    allowed_dimensions: list[str]
 
 
 class DimensionDefinition(BaseModel):
@@ -41,51 +37,15 @@ class DimensionDefinition(BaseModel):
     expressions: DialectExpressions
 
 
-class JoinContract(BaseModel):
-    left: str
-    right: str
-    relationship: str
-    allowed_types: list[str]
-
-
-class ColumnClassification(StrEnum):
-    NON_SENSITIVE = "non_sensitive"
-    SENSITIVE = "sensitive"
-    PROHIBITED = "prohibited"
-
-
-class PrivacyDefinition(BaseModel):
-    privacy_unit: str
-    minimum_group_size: int = Field(ge=1)
-
-    def suppresses(self, group_size: int) -> bool:
-        return group_size < self.minimum_group_size
-
-
 class AnalyticsCatalog(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Old catalogs may contain policy-era keys such as allowed_dimensions,
+    # join_contracts, column_policies, and privacy. Pydantic ignores those legacy
+    # fields during deserialization; they no longer participate in planning or execution.
+    model_config = ConfigDict(extra="ignore")
 
     catalog_version: str
     metrics: dict[str, MetricDefinition]
     dimensions: dict[str, DimensionDefinition]
-    join_contracts: list[JoinContract]
-    column_policies: dict[str, ColumnClassification]
-    privacy: PrivacyDefinition
-
-    @model_validator(mode="after")
-    def validate_references(self) -> "AnalyticsCatalog":
-        unknown_dimensions = {
-            dimension_id
-            for metric in self.metrics.values()
-            for dimension_id in metric.allowed_dimensions
-            if dimension_id not in self.dimensions
-        }
-        if unknown_dimensions:
-            raise ValueError(
-                "Metrics reference undefined dimensions: "
-                + ", ".join(sorted(unknown_dimensions))
-            )
-        return self
 
     def resolve_metric_id(self, alias: str) -> str:
         return self._resolve_alias(alias, self.metrics, ErrorCode.METRIC_UNDEFINED, "metric")
@@ -112,39 +72,6 @@ class AnalyticsCatalog(BaseModel):
                 ErrorCode.METRIC_UNDEFINED, f"Undefined dimension: {dimension_id}."
             ) from exc
         return dimension.expressions.for_dialect(dialect)
-
-    def validate_metric_dimensions(
-        self, metric_ids: Iterable[str], dimension_ids: Iterable[str]
-    ) -> None:
-        requested_dimensions = set(dimension_ids)
-        unknown_dimensions = requested_dimensions - self.dimensions.keys()
-        if unknown_dimensions:
-            raise Prompt2InsightError(
-                ErrorCode.METRIC_UNDEFINED,
-                f"Undefined dimensions: {', '.join(sorted(unknown_dimensions))}.",
-            )
-
-        for metric_id in metric_ids:
-            try:
-                metric = self.metrics[metric_id]
-            except KeyError as exc:
-                raise Prompt2InsightError(
-                    ErrorCode.METRIC_UNDEFINED, f"Undefined metric: {metric_id}."
-                ) from exc
-            unsupported = requested_dimensions - set(metric.allowed_dimensions)
-            if unsupported:
-                raise Prompt2InsightError(
-                    ErrorCode.METRIC_UNDEFINED,
-                    f"Metric {metric_id} does not support dimensions: "
-                    f"{', '.join(sorted(unsupported))}.",
-                )
-
-    def sql_join_contracts(self) -> frozenset[tuple[str, str, str]]:
-        return frozenset(
-            (contract.left, contract.right, join_type.lower())
-            for contract in self.join_contracts
-            for join_type in contract.allowed_types
-        )
 
     @staticmethod
     def _resolve_alias[T: MetricDefinition | DimensionDefinition](

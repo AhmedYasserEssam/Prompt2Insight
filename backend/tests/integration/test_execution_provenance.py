@@ -74,9 +74,6 @@ async def _parents(repository: AnalyticsRequestRepository) -> tuple[PlanningCont
             "catalog_version": "test",
             "metrics": {},
             "dimensions": {},
-            "join_contracts": [],
-            "column_policies": {},
-            "privacy": {"privacy_unit": "analytics.orders.id", "minimum_group_size": 1},
         }
     )
     async with factory() as session:
@@ -310,7 +307,6 @@ async def test_published_catalog_persists_and_reloads_canonical_references(
                         "postgres": "SUM(sales.sales)",
                         "mysql": "SUM(sales.sales)",
                     },
-                    "allowed_dimensions": ["month"],
                 }
             },
             "dimensions": {
@@ -324,13 +320,6 @@ async def test_published_catalog_persists_and_reloads_canonical_references(
                     },
                 }
             },
-            "join_contracts": [],
-            "column_policies": {
-                "sales.customer_id": "sensitive",
-                "sales.customer_name": "sensitive",
-                "sales.postal_code": "sensitive",
-            },
-            "privacy": {"privacy_unit": "sales.customer_id", "minimum_group_size": 1},
         }
     )
     factory = repository._session_factory
@@ -384,12 +373,6 @@ async def test_published_catalog_persists_and_reloads_canonical_references(
     assert content["dimensions"]["month"]["expressions"]["postgres"] == (  # type: ignore[index]
         "DATE_TRUNC('MONTH', analytics.sales.order_date)"
     )
-    assert set(content["column_policies"]) == {  # type: ignore[arg-type]
-        "analytics.sales.customer_id",
-        "analytics.sales.customer_name",
-        "analytics.sales.postal_code",
-    }
-    assert content["privacy"]["privacy_unit"] == "analytics.sales.customer_id"  # type: ignore[index]
     assert record.content_hash == sha256(
         json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -485,9 +468,6 @@ async def test_refresh_schema_persists_current_postgres_namespace_and_preserves_
                     "catalog_version": "test",
                     "metrics": {},
                     "dimensions": {},
-                    "join_contracts": [],
-                    "column_policies": {},
-                    "privacy": {"privacy_unit": "sales.id", "minimum_group_size": 1},
                 },
             )
         )

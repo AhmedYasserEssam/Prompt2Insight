@@ -170,7 +170,6 @@ class AnalyticsRequestService:
                 try:
                     execution = await self._query_executor.execute(
                         plan=result.output,
-                        catalog=context.catalog,
                         schema_snapshot=context.schema_snapshot,
                         connector=connector,
                         settings=self._settings,

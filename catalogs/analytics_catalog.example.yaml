@@ -14,7 +14,6 @@ metrics:
     expressions:
       postgres: SUM(analytics.order_items.net_amount)
       mysql: SUM(analytics.order_items.net_amount)
-    allowed_dimensions: [order_month, product_category, region]
 
 dimensions:
   order_month:
@@ -58,20 +57,3 @@ dimensions:
     expressions:
       postgres: analytics.orders.region
       mysql: analytics.orders.region
-
-join_contracts:
-  - left: analytics.order_items.order_id
-    right: analytics.orders.id
-    relationship: many_to_one
-    allowed_types: [inner]
-
-column_policies:
-  analytics.customers.email: sensitive
-  analytics.customers.phone: prohibited
-  analytics.order_items.net_amount: non_sensitive
-  analytics.orders.created_at: non_sensitive
-  analytics.orders.region: non_sensitive
-
-privacy:
-  privacy_unit: analytics.orders.customer_id
-  minimum_group_size: 5
