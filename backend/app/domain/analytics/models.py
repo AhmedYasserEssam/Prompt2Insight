@@ -1,10 +1,22 @@
+from datetime import date, datetime
 from enum import StrEnum
+from math import isfinite
+from re import compile as re_compile
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    field_validator,
+)
 
-from app.core.errors import ErrorCode
+from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import SQLDialect
 
 
@@ -39,14 +51,56 @@ class QueryFilter(BaseModel):
     value: Any
 
 
-QueryParameterValue = str | float | bool | None
+type QueryParameterValue = StrictStr | StrictInt | StrictFloat | StrictBool | None
+type QueryParameterBinding = str | int | float | bool | date | datetime | None
+
+_ISO_DATE = re_compile(r"\d{4}-\d{2}-\d{2}")
+_ISO_DATETIME = re_compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?"
+)
 
 
 class QueryParameter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    type: Literal["string", "integer", "number", "boolean", "date", "datetime", "null"]
     value: QueryParameterValue
+
+    def binding_value(self) -> QueryParameterBinding:
+        if self.type == "string" and isinstance(self.value, str):
+            return self.value
+        if self.type == "integer" and type(self.value) is int:
+            return self.value
+        if self.type == "number" and type(self.value) in {int, float}:
+            if isinstance(self.value, float) and not isfinite(self.value):
+                raise self._invalid_value()
+            return self.value
+        if self.type == "boolean" and type(self.value) is bool:
+            return self.value
+        if self.type == "null" and self.value is None:
+            return None
+        if self.type == "date" and isinstance(self.value, str) and _ISO_DATE.fullmatch(self.value):
+            try:
+                return date.fromisoformat(self.value)
+            except ValueError as exc:
+                raise self._invalid_value() from exc
+        if (
+            self.type == "datetime"
+            and isinstance(self.value, str)
+            and _ISO_DATETIME.fullmatch(self.value)
+        ):
+            try:
+                return datetime.fromisoformat(self.value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise self._invalid_value() from exc
+        raise self._invalid_value()
+
+    def _invalid_value(self) -> Prompt2InsightError:
+        return Prompt2InsightError(
+            ErrorCode.INVALID_QUERY_PARAMETER,
+            f"Query parameter {self.name!r} does not match declared type {self.type!r}.",
+        )
 
 
 class QueryPlan(BaseModel):
@@ -73,8 +127,8 @@ class QueryPlan(BaseModel):
             raise ValueError("Query parameter names must be unique.")
         return parameters
 
-    def parameter_bindings(self) -> dict[str, QueryParameterValue]:
-        return {parameter.name: parameter.value for parameter in self.parameters}
+    def parameter_bindings(self) -> dict[str, QueryParameterBinding]:
+        return {parameter.name: parameter.binding_value() for parameter in self.parameters}
 
 
 class ChartSpecification(BaseModel):

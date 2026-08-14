@@ -150,8 +150,34 @@ class SQLAlchemyConnectorBase(SQLDatabaseConnector):
                 ErrorCode.SQL_POLICY_REJECTED,
                 "The analytics role cannot modify the database.",
             )
+        if any(
+            marker in message
+            for marker in (
+                "connection refused",
+                "connection reset",
+                "connection aborted",
+                "connection is closed",
+                "connection failure",
+                "connection timed out",
+                "connect timeout",
+                "could not connect",
+                "could not translate host name",
+                "can't connect",
+                "server closed the connection unexpectedly",
+                "server closed connection unexpectedly",
+                "network is unreachable",
+                "no route to host",
+                "name or service not known",
+                "temporary failure in name resolution",
+                "database server unavailable",
+            )
+        ):
+            return Prompt2InsightError(
+                ErrorCode.DATABASE_UNAVAILABLE,
+                "The database is unavailable.",
+                retryable=True,
+            )
         return Prompt2InsightError(
-            ErrorCode.DATABASE_UNAVAILABLE,
-            "The database operation failed.",
-            retryable=True,
+            ErrorCode.QUERY_EXECUTION_FAILED,
+            "The database could not execute the query.",
         )

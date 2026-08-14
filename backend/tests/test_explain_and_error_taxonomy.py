@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DataError, SQLAlchemyError
 
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.databases.models import ExplainResult
@@ -70,16 +70,38 @@ def test_mysql_explain_malformed_shapes_fail_closed(raw: object) -> None:
 
 
 @pytest.mark.parametrize(
-    ("message", "code"),
+    ("message", "code", "retryable"),
     [
-        ("statement timeout", ErrorCode.QUERY_TIMEOUT),
-        ("Lock wait timeout exceeded", ErrorCode.LOCK_TIMEOUT),
-        ("deadlock found", ErrorCode.LOCK_TIMEOUT),
-        ("connection refused", ErrorCode.DATABASE_UNAVAILABLE),
+        ("statement timeout", ErrorCode.QUERY_TIMEOUT, False),
+        ("Lock wait timeout exceeded", ErrorCode.LOCK_TIMEOUT, False),
+        ("deadlock found", ErrorCode.LOCK_TIMEOUT, False),
+        ("password authentication failed", ErrorCode.AUTHENTICATION_FAILED, False),
+        ("permission denied for table orders", ErrorCode.SQL_POLICY_REJECTED, False),
+        ("connection refused", ErrorCode.DATABASE_UNAVAILABLE, True),
+        ("server closed connection unexpectedly", ErrorCode.DATABASE_UNAVAILABLE, True),
+        ("operator does not exist: date >= text", ErrorCode.QUERY_EXECUTION_FAILED, False),
     ],
 )
-def test_database_error_normalization(message: str, code: ErrorCode) -> None:
-    assert SQLAlchemyConnectorBase._normalize_error(SQLAlchemyError(message)).code is code
+def test_database_error_normalization(
+    message: str, code: ErrorCode, retryable: bool
+) -> None:
+    error = SQLAlchemyConnectorBase._normalize_error(SQLAlchemyError(message))
+
+    assert error.code is code
+    assert error.retryable is retryable
+
+
+def test_data_error_is_query_execution_failure_not_database_unavailable() -> None:
+    error = DataError(
+        "SELECT :start_date",
+        {"start_date": "2015-01-01"},
+        ValueError("invalid input for query argument $1: str object has no attribute toordinal"),
+    )
+
+    normalized = SQLAlchemyConnectorBase._normalize_error(error)
+
+    assert normalized.code is ErrorCode.QUERY_EXECUTION_FAILED
+    assert not normalized.retryable
 
 
 def test_cost_error_category() -> None:

@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,6 +33,9 @@ def test_planner_prompt_treats_catalog_as_guidance_and_allows_derived_metrics() 
     assert "Derived metrics" in prompt
     assert "SELECT-only" in prompt
     assert "Parameterize user-supplied literal" in prompt
+    assert "Every parameter must include its correct type" in prompt
+    assert "schema column types to choose parameter types" in prompt
+    assert "half-open intervals" in prompt
 
 
 class FakeCompletions:
@@ -157,9 +161,21 @@ def test_query_plan_strict_schema_closes_parameters_object() -> None:
         indent=2,
     )
     assert strict_parameters["items"] == {"$ref": "#/$defs/QueryParameter"}
-    parameter_value_schema = strict_schema["$defs"]["QueryParameter"]["properties"]["value"]
+    parameter_schema = strict_schema["$defs"]["QueryParameter"]
+    assert parameter_schema["required"] == ["name", "type", "value"]
+    assert parameter_schema["additionalProperties"] is False
+    assert set(parameter_schema["properties"]["type"]["enum"]) == {
+        "string",
+        "integer",
+        "number",
+        "boolean",
+        "date",
+        "datetime",
+        "null",
+    }
+    parameter_value_schema = strict_schema["$defs"]["QueryParameterValue"]
     parameter_value_types = {item["type"] for item in parameter_value_schema["anyOf"]}
-    assert not {"integer", "number"} <= parameter_value_types
+    assert parameter_value_types == {"string", "integer", "number", "boolean", "null"}
     assert_strict_object_nodes(strict_schema)
 
 
@@ -168,13 +184,28 @@ def test_query_plan_without_parameters_produces_empty_bindings() -> None:
 
 
 @pytest.mark.parametrize(
-    ("value", "expected"),
-    [("West", "West"), (42, 42.0), (3.5, 3.5), (True, True), (None, None)],
+    ("parameter_type", "value", "expected"),
+    [
+        ("string", "West", "West"),
+        ("integer", 42, 42),
+        ("number", 3.5, 3.5),
+        ("boolean", True, True),
+        ("null", None, None),
+        ("date", "2015-01-01", date(2015, 1, 1)),
+        ("datetime", "2015-01-01T12:30:00", datetime(2015, 1, 1, 12, 30)),
+        (
+            "datetime",
+            "2015-01-01T12:30:00Z",
+            datetime(2015, 1, 1, 12, 30, tzinfo=UTC),
+        ),
+    ],
 )
-def test_query_plan_scalar_parameter_survives_binding(
-    value: object, expected: object
+def test_query_plan_typed_parameter_converts_to_database_binding(
+    parameter_type: str, value: object, expected: object
 ) -> None:
-    plan = query_plan([{"name": "filter_value", "value": value}])
+    plan = query_plan(
+        [{"name": "filter_value", "type": parameter_type, "value": value}]
+    )
 
     assert plan.parameter_bindings() == {"filter_value": expected}
 
@@ -185,6 +216,43 @@ def test_query_plan_rejects_nested_parameter_values(value: object) -> None:
         query_plan([{"name": "filter_value", "value": value}])
 
     assert "parameters.0.value" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("parameter_type", "value"),
+    [
+        ("date", "not-a-date"),
+        ("date", 123),
+        ("datetime", "2015-01-01 12:30:00"),
+        ("boolean", "West"),
+        ("integer", "2018"),
+        ("number", True),
+        ("null", "null"),
+    ],
+)
+def test_query_plan_rejects_invalid_typed_parameter_values(
+    parameter_type: str, value: object
+) -> None:
+    plan = query_plan(
+        [{"name": "filter_value", "type": parameter_type, "value": value}]
+    )
+
+    with pytest.raises(Prompt2InsightError) as raised:
+        plan.parameter_bindings()
+
+    assert raised.value.code is ErrorCode.INVALID_QUERY_PARAMETER
+
+
+def test_query_plan_rejects_duplicate_parameter_names() -> None:
+    with pytest.raises(ValidationError) as raised:
+        query_plan(
+            [
+                {"name": "value", "type": "string", "value": "a"},
+                {"name": "value", "type": "string", "value": "b"},
+            ]
+        )
+
+    assert "parameter names must be unique" in str(raised.value)
 
 
 async def test_planner_primary_failure_uses_fallback_with_strict_query_plan_schema() -> None:

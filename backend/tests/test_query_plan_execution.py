@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 
 from app.application.analytics.execute_query_plan import QueryPlanExecutor
@@ -180,7 +182,7 @@ async def test_scalar_parameters_reach_explain_and_execution_as_bindings() -> No
     )
 
     await QueryPlanExecutor().execute(
-        plan=plan(filtered_sql, [{"name": "region", "value": "West"}]),
+        plan=plan(filtered_sql, [{"name": "region", "type": "string", "value": "West"}]),
         schema_snapshot=current,
         connector=connector,
         settings=Settings(),
@@ -188,6 +190,60 @@ async def test_scalar_parameters_reach_explain_and_execution_as_bindings() -> No
 
     assert connector.explained_parameters == {"region": "West"}
     assert connector.executed_parameters == {"region": "West"}
+
+
+async def test_date_parameters_are_converted_before_explain_and_execution() -> None:
+    current = sales_snapshot()
+    connector = Connector(current)
+    sql = (
+        "SELECT analytics.sales.product_name, SUM(analytics.sales.sales) AS total_sales "
+        "FROM analytics.sales WHERE analytics.sales.order_date >= :start_date "
+        "AND analytics.sales.order_date < :end_date "
+        "GROUP BY analytics.sales.product_name ORDER BY total_sales DESC LIMIT 5"
+    )
+
+    await QueryPlanExecutor().execute(
+        plan=plan(
+            sql,
+            [
+                {"name": "start_date", "type": "date", "value": "2015-01-01"},
+                {"name": "end_date", "type": "date", "value": "2017-01-01"},
+            ],
+            metric_ids=["revenue"],
+            dimension_ids=["product_name"],
+        ),
+        schema_snapshot=current,
+        connector=connector,
+        settings=Settings(),
+    )
+
+    assert connector.explained_parameters == {
+        "start_date": date(2015, 1, 1),
+        "end_date": date(2017, 1, 1),
+    }
+    assert connector.executed_parameters == connector.explained_parameters
+
+
+async def test_invalid_typed_parameter_fails_before_database_execution() -> None:
+    current = sales_snapshot()
+    connector = Connector(current)
+
+    with pytest.raises(Prompt2InsightError) as captured:
+        await QueryPlanExecutor().execute(
+            plan=plan(
+                "SELECT analytics.sales.sales FROM analytics.sales "
+                "WHERE analytics.sales.order_date >= :start_date",
+                [{"name": "start_date", "type": "date", "value": "not-a-date"}],
+                metric_ids=[],
+                dimension_ids=[],
+            ),
+            schema_snapshot=current,
+            connector=connector,
+            settings=Settings(),
+        )
+
+    assert captured.value.code is ErrorCode.INVALID_QUERY_PARAMETER
+    assert not connector.explained and not connector.executed
 
 
 @pytest.mark.parametrize(

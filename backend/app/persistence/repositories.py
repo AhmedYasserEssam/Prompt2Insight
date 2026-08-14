@@ -82,7 +82,10 @@ class AnalyticsRequestRepository:
                         {
                             "metric_ids": response.query_plan.metric_ids,
                             "dimension_ids": response.query_plan.dimension_ids,
-                            "parameters": response.query_plan.parameter_bindings(),
+                            "parameters": [
+                                parameter.model_dump(mode="json")
+                                for parameter in response.query_plan.parameters
+                            ],
                             "fallback_used": response.model_metadata.fallback_used
                             if response.model_metadata
                             else False,

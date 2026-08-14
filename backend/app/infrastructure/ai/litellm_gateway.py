@@ -319,10 +319,15 @@ matches the user's intent, but do not require every calculation to have a catalo
 metrics and ordinary analytical SQL expressions are allowed, including AVG, MIN, MAX, COUNT,
 COUNT(DISTINCT ...), arithmetic, CASE, DATE_TRUNC, and EXTRACT. Use straightforward
 {dialect.value} SELECT-only SQL and {dialect.value} syntax. Parameterize user-supplied literal
-values. Do not execute SQL. Return only the required structured result. Use needs_clarification
-only when the business intent is genuinely ambiguous, and unsupported when appropriate. The
-backend independently enforces physical schema access, read-only SQL, cost, timeout, and row
-limits."""
+values. Every parameter must include its correct type: use string for text, integer for whole
+numbers, number for decimal values, boolean for true/false, date for YYYY-MM-DD, datetime for a
+narrow ISO-8601 timestamp such as 2026-08-14T10:30:00, and null only for null. Use schema column
+types to choose parameter types whenever possible; do not rely on SQL casts to repair parameter
+typing. For year ranges, prefer half-open intervals such as >= :start_date and < :end_date with
+date parameters. Do not execute SQL. Return only the required structured result. Use
+needs_clarification only when the business intent is genuinely ambiguous, and unsupported when
+appropriate. The backend independently enforces physical schema access, read-only SQL, cost,
+timeout, and row limits."""
 
 
 class LiteLLMGateway(VLLMGateway):

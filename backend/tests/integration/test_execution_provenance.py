@@ -186,6 +186,9 @@ async def test_repository_persists_execution_provenance(
         database_dialect=SQLDialect.POSTGRES,
         interpretation="revenue",
         sql=sql,
+        parameters=[
+            {"name": "start_date", "type": "date", "value": "2015-01-01"},
+        ],
     )
     metadata = ModelExecutionMetadata(
         provider="groq",
@@ -234,6 +237,9 @@ async def test_repository_persists_execution_provenance(
     assert execution.model_metadata["model"] == metadata.model
     assert execution.plan_metadata["fallback_used"] is fallback
     assert execution.plan_metadata["fallback_reason"] == metadata.fallback_reason
+    assert execution.plan_metadata["parameters"] == [
+        {"name": "start_date", "type": "date", "value": "2015-01-01"},
+    ]
     assert stored_request.catalog_revision_id == context.catalog_revision_id
     assert stored_request.schema_snapshot_id == context.schema_snapshot_id
     assert stored_conversation.connection_profile_id == context.connection_profile_id

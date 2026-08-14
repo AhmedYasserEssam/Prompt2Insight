@@ -20,6 +20,8 @@ class ErrorCode(StrEnum):
     METRIC_POLICY_VIOLATION = "metric_policy_violation"
     PRIVACY_POLICY_VIOLATION = "privacy_policy_violation"
     QUERY_TOO_EXPENSIVE = "query_too_expensive"
+    INVALID_QUERY_PARAMETER = "invalid_query_parameter"
+    QUERY_EXECUTION_FAILED = "query_execution_failed"
     DATABASE_UNAVAILABLE = "database_unavailable"
     QUERY_TIMEOUT = "query_timeout"
     LOCK_TIMEOUT = "lock_timeout"

@@ -218,10 +218,14 @@ class AnalyticsRequestService:
                     answer_model_metadata=answer_metadata,
                 )
         except Prompt2InsightError as exc:
+            cause = exc.__cause__ or exc
             logger.warning(
-                "Analytics request failed request_id=%s error_code=%s detail=%s",
+                "Analytics request failed request_id=%s error_code=%s dialect=%s "
+                "exception_class=%s detail=%s",
                 request.request_id,
                 exc.code.value,
+                context.dialect.value,
+                type(cause).__name__,
                 exc.message,
             )
             response = AnalyticsResponse(

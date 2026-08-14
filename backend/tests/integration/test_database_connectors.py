@@ -1,4 +1,5 @@
 import os
+from datetime import date
 
 import pytest
 
@@ -69,6 +70,23 @@ async def test_connector_returns_json_explain_plan(connector) -> None:
     plan = await connector.explain(PreparedQuery(sql="SELECT id FROM analytics.orders"))
 
     assert plan.raw_plan
+
+
+async def test_connector_executes_date_bindings(connector) -> None:
+    result = await connector.execute_read_only(
+        PreparedQuery(
+            sql=(
+                "SELECT total FROM analytics.orders WHERE order_date >= :start_date "
+                "AND order_date < :end_date"
+            ),
+            parameters={
+                "start_date": date(2015, 1, 1),
+                "end_date": date(2017, 1, 1),
+            },
+        )
+    )
+
+    assert result.rows == [[42.50]]
 
 
 async def test_analytics_role_cannot_execute_dml_or_ddl(connector) -> None:
