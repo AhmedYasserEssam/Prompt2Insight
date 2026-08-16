@@ -6,6 +6,8 @@ import {
   askAnalyticsQuestion,
   ResponseLanguage,
 } from "@/lib/api";
+import {formatTableValue} from "@/lib/visualization";
+import {ChartRenderer} from "@/components/chart-renderer";
 
 const labels = {
   en: {
@@ -96,8 +98,8 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
           {result.answer ? <div className="stack"><strong>{t.answer}</strong><div>{result.answer}</div></div> : null}
           {result.insights?.length ? <ul>{result.insights.map((insight) => <li key={insight}>{insight}</li>)}</ul> : null}
           {result.status === "empty_result" ? <div>{t.empty}</div> : null}
-          {result.chart && result.table ? <ResultChart chart={result.chart} table={result.table} empty={t.chartEmpty} /> : null}
-          {result.table ? <div className="stack"><strong>{t.results}</strong><div className="table-wrap" dir="ltr"><table><thead><tr>{result.table.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{result.table.rows.map((row, index) => <tr key={index}>{row.map((value, cell) => <td key={cell}>{String(value ?? "")}</td>)}</tr>)}</tbody></table></div></div> : null}
+          {result.chart && result.table ? <ChartRenderer chart={result.chart} table={result.table} language={result.language} empty={t.chartEmpty} /> : null}
+          {result.table ? <div className="stack"><strong>{t.results}</strong><div className="table-wrap"><table><thead><tr>{result.table.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{result.table.rows.map((row, index) => <tr key={index}>{row.map((value, cell) => <td className={typeof value === "number" ? "numeric-cell" : ""} key={cell}>{formatTableValue(value, result.table?.columns[cell] ?? "", result.language)}</td>)}</tr>)}</tbody></table></div></div> : null}
           {result.warnings?.length ? <div className="stack"><strong>{t.warnings}</strong><ul>{result.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div> : null}
           {result.sql ? <div className="stack"><strong>{t.sql}</strong><pre dir="ltr">{result.sql}</pre></div> : null}
           {result.error_code ? <code dir="ltr">{result.error_code}</code> : null}
@@ -105,34 +107,4 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
       ) : null}
     </div>
   );
-}
-
-function ResultChart({
-  chart,
-  table,
-  empty,
-}: {
-  chart: NonNullable<AnalyticsResponse["chart"]>;
-  table: NonNullable<AnalyticsResponse["table"]>;
-  empty: string;
-}) {
-  const xIndex = table.columns.indexOf(chart.x_column);
-  const series = chart.y_columns.map((column) => ({
-    column,
-    index: table.columns.indexOf(column),
-  }));
-  const points = table.rows.flatMap((row) => series.map((item) => ({
-    label: String(row[xIndex] ?? ""), series: item.column, value: Number(row[item.index]),
-  }))).filter((point) => Number.isFinite(point.value));
-  const maximum = Math.max(...points.map((point) => point.value), 1);
-
-  return <figure className="chart" aria-label={chart.title}>
-    <figcaption>{chart.title}</figcaption>
-    {points.length ? <div className={`chart-bars chart-${chart.chart_type}`}>
-      {points.map((point) => <div className="chart-point" key={`${point.label}-${point.series}`}>
-        <div className="chart-bar" style={{height: `${Math.max((point.value / maximum) * 100, 2)}%`}} title={`${point.label} · ${point.series}: ${point.value}`} />
-        <small>{point.label} · {point.series}</small>
-      </div>)}
-    </div> : <small>{empty}</small>}
-  </figure>;
 }

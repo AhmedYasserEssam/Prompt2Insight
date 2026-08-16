@@ -1,13 +1,34 @@
 export type ResponseLanguage = "auto" | "en" | "ar";
 
+export type ChartType =
+  | "bar"
+  | "horizontal_bar"
+  | "line"
+  | "area"
+  | "scatter"
+  | "donut"
+  | "kpi";
+
+export type ChartSpecification = {
+  type: ChartType;
+  x_column?: string | null;
+  y_columns: string[];
+  series_column?: string | null;
+  title?: string | null;
+  x_label?: string | null;
+  y_label?: string | null;
+};
+
+export type ResultTable = {columns: string[]; rows: unknown[][]};
+
 export type AnalyticsResponse = {
   status: "success" | "needs_clarification" | "unsupported" | "empty_result" | "failed";
   request_id: string;
   language: "en" | "ar";
   answer?: string | null;
   insights: string[];
-  table?: {columns: string[]; rows: unknown[][]} | null;
-  chart?: {chart_type: "bar" | "line" | "pie" | "scatter"; x_column: string; y_columns: string[]; title: string} | null;
+  table?: ResultTable | null;
+  chart?: ChartSpecification | null;
   sql?: string | null;
   warnings: string[];
   error_code?: string | null;

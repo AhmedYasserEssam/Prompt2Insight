@@ -7,8 +7,8 @@ from uuid import UUID
 from app.application.analytics.answer_fallback import deterministic_answer
 from app.application.analytics.answer_validation import (
     validate_answer_output,
-    validate_chart_specification,
 )
+from app.application.analytics.chart_recommendation import ChartPolicy, recommend_chart
 from app.application.analytics.execute_query_plan import ExecutedPlan, QueryPlanExecutor
 from app.application.analytics.resolve_language import resolve_response_language
 from app.core.config import Settings
@@ -236,6 +236,18 @@ class AnalyticsRequestService:
                     )
 
                 answer_output = answer_outcome.output
+                chart_recommendation = recommend_chart(
+                    table,
+                    answer_output.chart,
+                    ChartPolicy(
+                        max_bar_categories=self._settings.max_chart_bar_categories,
+                        max_donut_categories=self._settings.max_chart_donut_categories,
+                        max_series=self._settings.max_chart_series,
+                    ),
+                )
+                answer_output = answer_output.model_copy(
+                    update={"chart": chart_recommendation.chart}
+                )
                 response = AnalyticsResponse(
                     status=(
                         AnalyticsStatus.EMPTY_RESULT
@@ -254,6 +266,11 @@ class AnalyticsRequestService:
                         *answer_output.warnings,
                         *execution_outcome.warnings,
                         *answer_outcome.warnings,
+                        *(
+                            [_chart_warning(plan_result.output.response_language)]
+                            if chart_recommendation.suggestion_rejected
+                            else []
+                        ),
                         *(
                             [_truncation_warning(plan_result.output.response_language)]
                             if execution.result.truncated
@@ -412,39 +429,13 @@ class AnalyticsRequestService:
                 return _AnswerOutcome(
                     fallback, regenerated.metadata, [_answer_fallback_warning(language)]
                 )
-            return self._validated_chart_outcome(
-                regenerated,
-                table,
-                [_answer_regenerated_warning(language)],
-                request.request_id,
-                language,
-            )
-
-        return self._validated_chart_outcome(first, table, [], request.request_id, language)
-
-    @staticmethod
-    def _validated_chart_outcome(
-        result: GenerationResult[AnswerOutput],
-        table: ResultTable,
-        warnings: list[str],
-        request_id: UUID,
-        language: str,
-    ) -> _AnswerOutcome:
-        try:
-            validate_chart_specification(result.output.chart, table)
-        except Prompt2InsightError as exc:
-            logger.warning(
-                "Chart omitted after validation request_id=%s error_code=%s detail=%s",
-                request_id,
-                exc.code.value,
-                exc.message,
-            )
             return _AnswerOutcome(
-                result.output.model_copy(update={"chart": None}),
-                result.metadata,
-                [_chart_warning(language), *warnings],
+                regenerated.output,
+                regenerated.metadata,
+                [_answer_regenerated_warning(language)],
             )
-        return _AnswerOutcome(result.output, result.metadata, warnings)
+
+        return _AnswerOutcome(first.output, first.metadata, [])
 
     @staticmethod
     def _log_answer_recovery(
@@ -486,9 +477,10 @@ Use result values exactly for analytical claims. Do not invent numerical analyti
 may naturally mention the user's requested filters, dates, years, categories, locations, and
 top-N context. Use the executed query/filter context and result rows supplied below. Keep the
 answer concise. Preserve exact returned categorical and entity text; do not translate or rename
-identifiers or product names. You may propose a chart only with exact result column names in
-x_column and y_columns, and must not invent chart data. Return only the required structured JSON
-result."""
+identifiers or product names. A chart suggestion expresses meaning only: choose a semantic type,
+exact result column names in x_column, y_columns, and optional series_column, plus optional text
+labels. Never invent chart data or visual styling; the application controls all appearance and
+formatting. Return only the required structured JSON result."""
 
 
 def _answer_regeneration_system_prompt(language: str) -> str:

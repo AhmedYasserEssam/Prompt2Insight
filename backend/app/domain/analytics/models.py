@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 from enum import StrEnum
 from re import compile as re_compile
 from typing import Any, Literal
@@ -9,6 +10,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictStr,
+    field_serializer,
     field_validator,
 )
 
@@ -137,12 +139,23 @@ class QueryPlan(BaseModel):
 
 
 class ChartSpecification(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    chart_type: Literal["bar", "line", "pie", "scatter"]
-    x_column: str
+    chart_type: Literal[
+        "bar",
+        "horizontal_bar",
+        "line",
+        "area",
+        "scatter",
+        "donut",
+        "kpi",
+    ] = Field(alias="type")
+    x_column: str | None = None
     y_columns: list[str] = Field(min_length=1)
-    title: str
+    series_column: str | None = None
+    title: str | None = None
+    x_label: str | None = None
+    y_label: str | None = None
 
 
 class ResultTable(BaseModel):
@@ -150,6 +163,15 @@ class ResultTable(BaseModel):
 
     columns: list[str]
     rows: list[list[Any]]
+
+    @field_serializer("rows", when_used="json")
+    def serialize_decimal_values_as_json_numbers(
+        self, rows: list[list[Any]]
+    ) -> list[list[Any]]:
+        return [
+            [float(value) if isinstance(value, Decimal) else value for value in row]
+            for row in rows
+        ]
 
 
 class AnswerOutput(BaseModel):

@@ -28,7 +28,7 @@ Question
   -> read-only execution
   -> answer generation
   -> lightweight answer grounding (one regeneration, then deterministic fallback)
-  -> independently validated optional chart
+  -> deterministic result-aware chart recommendation and normalization
 ```
 
 Query-level database errors receive one planner repair attempt. Repaired SQL always returns
@@ -47,8 +47,9 @@ physical column-existence checks, dangerous SQL/function restrictions, bounded o
 statement and lock timeouts, and EXPLAIN cost control. Once safe SQL executes, answer or chart
 problems cannot erase the result table, validated SQL, or execution provenance. Answer grounding
 rejects clear fabricated result numbers without trying to prove every contextual number in
-natural language; chart-column grounding remains strict and independent. The LLM never receives
-database credentials and never executes SQL directly.
+natural language. The LLM supplies only semantic chart intent; the application validates it
+against the result schema and cardinality, then normalizes, replaces, or omits it independently.
+The LLM never receives database credentials and never executes SQL directly.
 
 ## Start the project
 

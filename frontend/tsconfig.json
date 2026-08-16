@@ -26,7 +26,8 @@
       ]
     },
     "allowJs": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
   },
   "include": [
     "next-env.d.ts",

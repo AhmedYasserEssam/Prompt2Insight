@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     max_joins: int = 6
     max_estimated_rows: int = 100_000
     max_query_cost: float = 100_000.0
+    max_chart_bar_categories: int = Field(default=20, ge=2, le=100)
+    max_chart_donut_categories: int = Field(default=6, ge=2, le=12)
+    max_chart_series: int = Field(default=8, ge=2, le=20)
 
     @field_validator("cors_origins", mode="before")
     @classmethod

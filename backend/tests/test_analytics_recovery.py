@@ -380,7 +380,7 @@ async def test_invalid_chart_is_omitted_without_failing_the_query() -> None:
     assert any("invalid chart was omitted" in warning for warning in response.warnings)
 
 
-async def test_valid_chart_is_retained() -> None:
+async def test_scalar_chart_is_normalized_to_kpi() -> None:
     schema = snapshot()
     connector = Connector(schema, [query_result()])
     chart = ChartSpecification(
@@ -394,7 +394,10 @@ async def test_valid_chart_is_retained() -> None:
     response = await run(service(connector, Planner(plan()), answerer))
 
     assert response.status is AnalyticsStatus.SUCCESS
-    assert response.chart == chart
+    assert response.chart is not None
+    assert response.chart.chart_type == "kpi"
+    assert response.chart.y_columns == ["total_sales"]
+    assert response.chart.title == "Sales"
 
 
 async def test_contextual_year_does_not_turn_executed_query_into_failure() -> None:

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.application.analytics.chart_recommendation import column_kind
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import (
     AnswerOutput,
@@ -82,11 +83,25 @@ def validate_chart_specification(
     """Keep chart grounding strict without coupling it to answer acceptance."""
     if chart is None:
         return
-    references = [chart.x_column, *chart.y_columns]
+    references = [*chart.y_columns]
+    if chart.x_column is not None:
+        references.append(chart.x_column)
+    if chart.series_column is not None:
+        references.append(chart.series_column)
     if any(column not in table.columns for column in references):
         raise Prompt2InsightError(
             ErrorCode.LLM_INVALID_OUTPUT,
             "The answer chart references columns outside the executed result schema.",
+        )
+    if chart.chart_type != "kpi" and chart.x_column is None:
+        raise Prompt2InsightError(
+            ErrorCode.LLM_INVALID_OUTPUT,
+            "The answer chart requires an x column.",
+        )
+    if any(column_kind(table, column) != "numeric" for column in chart.y_columns):
+        raise Prompt2InsightError(
+            ErrorCode.LLM_INVALID_OUTPUT,
+            "The answer chart requires numeric y columns.",
         )
 
 
