@@ -332,7 +332,13 @@ parameter value must be encoded as a string: integer "2018", number "500.25", bo
 null value. The type controls backend interpretation. Use schema column types to choose parameter
 types whenever possible; do not rely on SQL casts to repair parameter typing. For year ranges,
 prefer half-open intervals such as >= :start_date and < :end_date with date parameters. Do not
-execute SQL. Return only the required structured result. Use
+use substring matching (LIKE, ILIKE, or wildcard patterns) for categorical text filters by
+default. For categorical dimensions named city, state, region, country, category, sub_category,
+segment, ship_mode, or product_name, use case-insensitive, trimmed exact matching:
+LOWER(TRIM(column)) = LOWER(TRIM(:parameter)). For example, filter a qualified city column as
+LOWER(TRIM(analytics.sales.city)) = LOWER(TRIM(:city_name)). Do not apply LOWER or TRIM to
+identifier-like fields such as order_id, customer_id, or product_id; compare those with exact
+equality (column = :parameter). Do not execute SQL. Return only the required structured result. Use
 needs_clarification only when the business intent is genuinely ambiguous, and unsupported when
 appropriate. The backend independently enforces physical schema access, read-only SQL, cost,
 timeout, and row limits."""

@@ -40,6 +40,21 @@ def test_planner_prompt_treats_catalog_as_guidance_and_allows_derived_metrics() 
     assert "half-open intervals" in prompt
 
 
+def test_planner_prompt_normalizes_categorical_text_filters_only() -> None:
+    prompt = " ".join(_planner_system_prompt(SQLDialect.POSTGRES).split())
+
+    assert "Do not use substring matching (LIKE, ILIKE, or wildcard patterns)" in prompt
+    assert (
+        "city, state, region, country, category, sub_category, segment, ship_mode, or product_name"
+        in prompt
+    )
+    assert "LOWER(TRIM(column)) = LOWER(TRIM(:parameter))" in prompt
+    assert "LOWER(TRIM(analytics.sales.city)) = LOWER(TRIM(:city_name))" in prompt
+    assert "Do not apply LOWER or TRIM to identifier-like fields" in prompt
+    assert "order_id, customer_id, or product_id" in prompt
+    assert "exact equality (column = :parameter)" in prompt
+
+
 class FakeCompletions:
     def __init__(self, outcomes: list[object]) -> None:
         self._outcomes = outcomes
