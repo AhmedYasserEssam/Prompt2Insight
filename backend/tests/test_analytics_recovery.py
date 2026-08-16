@@ -111,14 +111,19 @@ class Planner:
 
 
 class Answerer:
-    def __init__(self, outputs: Sequence[AnswerOutput]) -> None:
+    def __init__(
+        self, outputs: Sequence[AnswerOutput | Prompt2InsightError]
+    ) -> None:
         self.outputs = list(outputs)
         self.calls: list[dict[str, object]] = []
 
     async def generate(self, **kwargs: object) -> GenerationResult[AnswerOutput]:
         self.calls.append(kwargs)
+        output = self.outputs.pop(0)
+        if isinstance(output, Prompt2InsightError):
+            raise output
         return GenerationResult(
-            output=self.outputs.pop(0),
+            output=output,
             metadata=ModelExecutionMetadata(
                 generation_stage=str(kwargs.get("generation_stage"))
             ),
@@ -346,11 +351,28 @@ async def test_second_invalid_answer_uses_deterministic_fallback_and_stays_succe
 
     assert response.status is AnalyticsStatus.SUCCESS
     assert response.error_code is None
-    assert response.answer == "Query completed successfully. 1 row returned."
+    assert response.answer == "The total sales is 10."
     assert response.table is not None and response.table.rows == [[10]]
     assert response.sql is not None
     assert response.query_plan is not None
     assert len(answerer.calls) == 2
+    assert any("deterministic result summary" in warning for warning in response.warnings)
+
+
+async def test_answer_generation_failure_uses_result_summary_and_stays_successful() -> None:
+    schema = snapshot()
+    connector = Connector(schema, [query_result()])
+    answerer = Answerer(
+        [Prompt2InsightError(ErrorCode.LLM_UNAVAILABLE, "Answer provider unavailable.")]
+    )
+
+    response = await run(service(connector, Planner(plan()), answerer))
+
+    assert response.status is AnalyticsStatus.SUCCESS
+    assert response.error_code is None
+    assert response.answer == "The total sales is 10."
+    assert response.table is not None and response.table.rows == [[10]]
+    assert len(answerer.calls) == 1
     assert any("deterministic result summary" in warning for warning in response.warnings)
 
 

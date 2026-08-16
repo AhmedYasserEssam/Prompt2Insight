@@ -116,21 +116,106 @@ def test_chart_validation_is_independent_and_strict() -> None:
 
 
 @pytest.mark.parametrize(
-    ("rows", "language", "expected"),
+    ("table", "language", "expected"),
     [
-        ([["Cairo", 10]], "en", "Query completed successfully. 1 row returned."),
         (
-            [["Cairo", 10], ["Giza", 20]],
+            ResultTable(columns=["average_order_total"], rows=[[428.73]]),
             "en",
-            "Query completed successfully. 2 rows returned.",
+            "The average order total is 428.73.",
         ),
-        ([["Cairo", 10]], "ar", "تم تنفيذ الاستعلام بنجاح. تم إرجاع 1 صفوف."),
-        ([], "en", "No matching rows were returned."),
+        (
+            ResultTable(
+                columns=["total_sales", "order_count"], rows=[[1250.5, 4]]
+            ),
+            "en",
+            "The result is total sales: 1250.5; order count: 4.",
+        ),
+        (
+            ResultTable(columns=["region", "revenue"], rows=[["Cairo", 10]]),
+            "en",
+            "The result is region: Cairo; revenue: 10.",
+        ),
+        (
+            ResultTable(
+                columns=["product_name", "total_sales"],
+                rows=[["Desk", 300], ["Chair", 200], ["Lamp", 100]],
+            ),
+            "en",
+            "The returned total sales ranking is: Desk — 300; Chair — 200; Lamp — 100.",
+        ),
+        (
+            ResultTable(
+                columns=["category", "total_sales"],
+                rows=[["Technology", 300], ["Furniture", 200], ["Office Supplies", 100]],
+            ),
+            "en",
+            "The total sales comparison is: Technology — 300; Furniture — 200; "
+            "Office Supplies — 100.",
+        ),
+        (
+            ResultTable(
+                columns=["month", "revenue"],
+                rows=[["2024-01", 10], ["2024-02", 30], ["2024-03", 20]],
+            ),
+            "en",
+            "The results cover 2024-01 through 2024-03. The highest revenue is 30 in "
+            "2024-02, and the lowest is 10 in 2024-01.",
+        ),
+        (
+            ResultTable(
+                columns=["customer", "city", "segment"],
+                rows=[["A", "Cairo", "Retail"], ["B", "Giza", "Wholesale"]],
+            ),
+            "en",
+            "The result contains 2 rows with customer, city, and segment.",
+        ),
+        (
+            ResultTable(
+                columns=["month", "total_sales"],
+                rows=[["2024-01", 10], ["2024-02", 30], ["2024-03", 20]],
+            ),
+            "ar",
+            "تغطي النتائج الفترة من 2024-01 إلى 2024-03. أعلى قيمة لـ إجمالي المبيعات هي "
+            "30 في 2024-02، وأدنى قيمة هي 10 في 2024-01.",
+        ),
+        (
+            ResultTable(columns=["average_order_total"], rows=[[428.73]]),
+            "ar",
+            "قيمة متوسط إجمالي الطلب هي 428.73.",
+        ),
+        (
+            ResultTable(
+                columns=["product_name", "total_sales"],
+                rows=[["Desk", 300], ["Chair", 200], ["Lamp", 100]],
+            ),
+            "ar",
+            "الترتيب حسب إجمالي المبيعات هو: Desk — 300؛ Chair — 200؛ Lamp — 100.",
+        ),
+        (
+            ResultTable(columns=[], rows=[["unlabelled"]]),
+            "en",
+            "Query completed successfully. 1 row returned.",
+        ),
+        (
+            ResultTable(columns=["region", "revenue"], rows=[]),
+            "en",
+            "No matching rows were returned.",
+        ),
     ],
 )
-def test_deterministic_answer_uses_only_query_result_row_count(
-    rows: list[list[object]], language: str, expected: str
+def test_deterministic_answer_summarizes_result_shape(
+    table: ResultTable, language: str, expected: str
 ) -> None:
-    table = ResultTable(columns=["region", "revenue"], rows=rows)
-
     assert deterministic_answer(table, language) == expected
+
+
+def test_deterministic_answer_does_not_mutate_result_table() -> None:
+    table = ResultTable(
+        columns=["product_name", "total_sales"],
+        rows=[["Desk", 300], ["Chair", 200], ["Lamp", 100]],
+    )
+    original = table.model_copy(deep=True)
+
+    deterministic_answer(table, "en")
+
+    assert table == original

@@ -383,7 +383,7 @@ async def test_answer_validation_failure_falls_back_without_erasing_execution_pr
 
     assert response.status is AnalyticsStatus.SUCCESS
     assert response.error_code is None
-    assert response.answer == "Query completed successfully. 1 row returned."
+    assert response.answer == "The result is region: Cairo; revenue: 10."
     assert response.sql == "SELECT region, revenue"
     assert response.table is not None and len(response.table.rows) == 1
     assert response.query_plan == planner.result.output
