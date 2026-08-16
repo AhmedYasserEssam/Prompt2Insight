@@ -19,6 +19,7 @@ _REQUEST_CONTEXT_NUMBER = re.compile(
     r"\s+(?:day|week|month|year)s?\b",
     flags=re.IGNORECASE,
 )
+_REQUEST_CONTEXT_YEAR = re.compile(r"(?<!\d)(?:19\d{2}|20\d{2}|2100)(?!\d)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,14 +130,23 @@ def _context_grounded_spans(
 
 
 def _request_context_spans(text: str, request_context: str | None) -> list[tuple[int, int]]:
-    """Allow relative time-window phrasing copied from the user's request."""
+    """Allow relative time windows and matching standalone years from the request."""
     if request_context is None:
         return []
     phrases = {
         match.group()
         for match in _REQUEST_CONTEXT_NUMBER.finditer(request_context)
     }
-    return _find_exact_spans_case_insensitive(text, phrases)
+    spans = _find_exact_spans_case_insensitive(text, phrases)
+    request_years = {
+        match.group() for match in _REQUEST_CONTEXT_YEAR.finditer(request_context)
+    }
+    spans.extend(
+        match.span()
+        for match in _REQUEST_CONTEXT_YEAR.finditer(text)
+        if match.group() in request_years
+    )
+    return spans
 
 
 def _find_pattern_spans(text: str, pattern: str) -> list[tuple[int, int]]:

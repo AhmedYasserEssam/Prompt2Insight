@@ -81,6 +81,42 @@ def test_request_context_grounds_relative_time_window_but_not_fabricated_result(
         )
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Show top selling product in 2016 in Houston",
+        "اعرض المنتج الأكثر مبيعاً في 2016 في هيوستن",
+        "اعرض top selling product في 2016 في Houston",
+    ],
+)
+def test_request_context_grounds_matching_year(question: str) -> None:
+    validate_answer_output(
+        AnswerOutput(answer="In 2016, X had sales of 12345.67."),
+        ResultTable(columns=["product_name", "total_sales"], rows=[["X", 12345.67]]),
+        request_context=question,
+    )
+
+
+def test_request_context_year_does_not_ground_fabricated_result_number() -> None:
+    with pytest.raises(Prompt2InsightError):
+        validate_answer_output(
+            AnswerOutput(answer="Sales were 999999."),
+            ResultTable(columns=["total_sales"], rows=[[12345.67]]),
+            request_context="Show top selling product in 2016",
+        )
+
+
+def test_request_context_does_not_ground_a_different_year() -> None:
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(answer="In 2017, X had sales of 12345.67."),
+            ResultTable(columns=["product_name", "total_sales"], rows=[["X", 12345.67]]),
+            request_context="Show top selling product in 2016",
+        )
+
+    assert "'2017," in raised.value.message
+
+
 def test_top_n_context_grounds_only_a_top_n_phrase() -> None:
     context = AnswerGroundingContext(top_n=5)
     table = ResultTable(columns=["product_name"], rows=[["Cisco TelePresence"]])
