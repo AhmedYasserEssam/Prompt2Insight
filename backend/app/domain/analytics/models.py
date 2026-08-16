@@ -8,8 +8,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    StrictFloat,
-    StrictInt,
     StrictStr,
     field_validator,
 )
@@ -25,7 +23,6 @@ class ResponseLanguage(StrEnum):
 
 
 class AnalyticsStatus(StrEnum):
-    PLANNED = "planned"
     SUCCESS = "success"
     NEEDS_CLARIFICATION = "needs_clarification"
     UNSUPPORTED = "unsupported"
@@ -153,31 +150,6 @@ class ResultTable(BaseModel):
 
     columns: list[str]
     rows: list[list[Any]]
-
-
-class DateRangeGrounding(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    start: str
-    end: str
-
-
-class NumericFilterGrounding(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    field: str
-    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte"]
-    value: StrictInt | StrictFloat
-
-
-class AnswerGroundingContext(BaseModel):
-    """Executed query context that may be mentioned without becoming a result fact."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    date_ranges: list[DateRangeGrounding] = Field(default_factory=list)
-    numeric_filters: list[NumericFilterGrounding] = Field(default_factory=list)
-    top_n: StrictInt | None = None
 
 
 class AnswerOutput(BaseModel):

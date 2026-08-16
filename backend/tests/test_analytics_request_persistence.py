@@ -316,12 +316,12 @@ async def test_production_request_generates_a_grounded_answer_from_executed_rows
     assert response.answer_model_metadata == answerer.result.metadata
     assert answerer.calls[0]["model_group"].name == "answer"
     assert '[["Cairo",10]]' in answerer.calls[0]["user_prompt"]
-    assert '"date_ranges":[]' in answerer.calls[0]["user_prompt"]
-    assert "executed query context" in answerer.calls[0]["system_prompt"]
-    assert "Preserve the exact returned text" in answerer.calls[0]["system_prompt"]
+    assert '"parameters":[]' in answerer.calls[0]["user_prompt"]
+    assert "Executed query/filter context" in answerer.calls[0]["user_prompt"]
+    assert "Preserve exact returned categorical" in answerer.calls[0]["system_prompt"]
 
 
-async def test_answer_grounding_detail_is_logged_but_not_exposed_in_public_response(
+async def test_answer_validation_failure_falls_back_without_erasing_execution_provenance(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     catalog, _ = load_catalog(
@@ -381,8 +381,14 @@ async def test_answer_grounding_detail_is_logged_but_not_exposed_in_public_respo
             request=AnalyticsRequest(request_id=uuid4(), question="Revenue"),
         )
 
-    assert response.error_code is ErrorCode.LLM_INVALID_OUTPUT
-    assert response.answer is None
+    assert response.status is AnalyticsStatus.SUCCESS
+    assert response.error_code is None
+    assert response.answer == "Query completed successfully. 1 row returned."
+    assert response.sql == "SELECT region, revenue"
+    assert response.table is not None and len(response.table.rows) == 1
+    assert response.query_plan == planner.result.output
+    assert len(answerer.calls) == 2
+    assert any("deterministic result summary" in warning for warning in response.warnings)
     assert "ungrounded numeric value" not in response.model_dump_json()
     assert "ungrounded numeric value: '48' (normalized=48)" in caplog.text
 

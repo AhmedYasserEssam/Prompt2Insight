@@ -31,8 +31,16 @@ class ErrorCode(StrEnum):
 
 
 class Prompt2InsightError(Exception):
-    def __init__(self, code: ErrorCode, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        retryable: bool = False,
+        safe_detail: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        self.safe_detail = safe_detail

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, cast
@@ -184,6 +185,38 @@ class VLLMGateway:
             database_dialect=dialect,
         )
 
+    async def repair(
+        self,
+        *,
+        question: str,
+        dialect: SQLDialect,
+        catalog: AnalyticsCatalog,
+        schema_snapshot: SchemaSnapshot,
+        failed_plan: QueryPlan,
+        database_error: str,
+        model_group: ModelGroup[QueryPlan],
+    ) -> GenerationResult[QueryPlan]:
+        """Repair one query-level SQL failure using the existing strict QueryPlan schema."""
+        parameter_metadata = json.dumps(
+            [parameter.model_dump(mode="json") for parameter in failed_plan.parameters]
+        )
+        return await self.generate(
+            model_group=model_group,
+            system_prompt=_sql_repair_system_prompt(dialect),
+            user_prompt=(
+                f"Original user question:\n{question}\n\n"
+                f"Database dialect:\n{dialect.value}\n\n"
+                f"Failed SQL:\n{failed_plan.sql or ''}\n\n"
+                "Parameter metadata (JSON):\n"
+                f"{parameter_metadata}"
+                f"\n\nSanitized database error:\n{database_error}\n\n"
+                "Approved semantic catalog and schema context (JSON):\n"
+                f"{catalog.model_dump_json()}\n{schema_snapshot.model_dump_json()}"
+            ),
+            generation_stage="sql_repair",
+            database_dialect=dialect,
+        )
+
     async def _generate_with_correction[OutputT: BaseModel](
         self,
         *,
@@ -342,6 +375,18 @@ equality (column = :parameter). Do not execute SQL. Return only the required str
 needs_clarification only when the business intent is genuinely ambiguous, and unsupported when
 appropriate. The backend independently enforces physical schema access, read-only SQL, cost,
 timeout, and row limits."""
+
+
+def _sql_repair_system_prompt(dialect: SQLDialect) -> str:
+    return f"""You repair a Prompt2Insight {dialect.value} query after one recoverable database
+execution error. Return a complete QueryPlan using the required strict schema. Preserve the
+original analytical intent and response language. Change only SQL and typed parameters needed to
+fix the supplied database error. Use only supplied physical tables and columns. The semantic
+catalog is business guidance, not authorization. Produce SELECT-only SQL, parameterize literal
+values, and preserve the QueryParameter name/type/value structure with string-or-null values.
+Never weaken or bypass validation, row limits, EXPLAIN, cost limits, or read-only execution. Return
+status ready with repaired SQL when repair is possible; otherwise return unsupported. Do not
+execute SQL and return only the required structured JSON result."""
 
 
 class LiteLLMGateway(VLLMGateway):

@@ -26,8 +26,14 @@ Question
   -> database-specific EXPLAIN
   -> cost guard
   -> read-only execution
-  -> grounded answer and validated chart
+  -> answer generation
+  -> lightweight answer grounding (one regeneration, then deterministic fallback)
+  -> independently validated optional chart
 ```
+
+Query-level database errors receive one planner repair attempt. Repaired SQL always returns
+through the same AST, physical-schema, row-limit, EXPLAIN, cost, and read-only execution path;
+timeouts, availability/authentication failures, and safety-policy rejections are never repaired.
 
 The semantic catalog supplies business-definition guidance, preferred metric and dimension
 expressions, descriptions, and English/Arabic terminology and aliases. It is planning context,
@@ -38,9 +44,11 @@ physical schema objects supplied to the planner.
 The security seam is the database and SQL layer: dedicated read-only credentials and
 transactions, SELECT/SELECT-CTE-only single statements, introspected approved schemas and tables,
 physical column-existence checks, dangerous SQL/function restrictions, bounded output,
-statement and lock timeouts, and EXPLAIN cost control. Answer numeric/date/entity grounding and
-chart-column grounding remain separate post-execution checks. The LLM never receives database
-credentials and never executes SQL directly.
+statement and lock timeouts, and EXPLAIN cost control. Once safe SQL executes, answer or chart
+problems cannot erase the result table, validated SQL, or execution provenance. Answer grounding
+rejects clear fabricated result numbers without trying to prove every contextual number in
+natural language; chart-column grounding remains strict and independent. The LLM never receives
+database credentials and never executes SQL directly.
 
 ## Start the project
 

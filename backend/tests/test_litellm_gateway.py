@@ -11,12 +11,13 @@ from pydantic import ValidationError
 from app.core.config import Settings
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import AnswerOutput, QueryPlan
-from app.domain.databases.models import SQLDialect
+from app.domain.databases.models import DatabaseCapabilities, SchemaSnapshot, SQLDialect
 from app.infrastructure.ai.litellm_gateway import (
     LiteLLMGateway,
     ModelGroup,
     VLLMGateway,
     _planner_system_prompt,
+    _sql_repair_system_prompt,
     _strict_json_schema,
     build_analytics_model_groups,
 )
@@ -53,6 +54,16 @@ def test_planner_prompt_normalizes_categorical_text_filters_only() -> None:
     assert "Do not apply LOWER or TRIM to identifier-like fields" in prompt
     assert "order_id, customer_id, or product_id" in prompt
     assert "exact equality (column = :parameter)" in prompt
+
+
+def test_sql_repair_prompt_preserves_strict_safety_and_parameter_contract() -> None:
+    prompt = " ".join(_sql_repair_system_prompt(SQLDialect.POSTGRES).split())
+
+    assert "strict schema" in prompt
+    assert "SELECT-only" in prompt
+    assert "typed parameters" in prompt
+    assert "name/type/value" in prompt
+    assert "Never weaken or bypass validation" in prompt
 
 
 class FakeCompletions:
@@ -427,6 +438,42 @@ async def test_qwen_planner_uses_catalog_context_and_explicit_dialect(
     assert result.metadata.model == "resolved-model"
     assert result.metadata.generation_stage == "planner"
     assert result.metadata.database_dialect is dialect
+
+
+async def test_sql_repair_uses_query_plan_schema_and_minimal_failure_context() -> None:
+    repaired = query_plan(
+        [{"name": "start_date", "type": "date", "value": "2015-01-01"}]
+    )
+    gateway, completions = gateway_with([repaired.model_dump_json()])
+    catalog, _ = load_catalog(CATALOG_PATH)
+    schema = SchemaSnapshot(
+        dialect=SQLDialect.POSTGRES,
+        database_name="analytics",
+        server_version="16",
+        tables=[],
+        capabilities=DatabaseCapabilities(dialect=SQLDialect.POSTGRES, server_version="16"),
+    )
+
+    result = await gateway.repair(
+        question="Show revenue",
+        dialect=SQLDialect.POSTGRES,
+        catalog=catalog,
+        schema_snapshot=schema,
+        failed_plan=query_plan(
+            [{"name": "start_date", "type": "date", "value": "2015-01-01"}]
+        ),
+        database_error="operator does not exist: date >= text",
+        model_group=planner_group(),
+    )
+
+    request = completions.calls[0]
+    user_prompt = request["messages"][1]["content"]
+    schema_output = request["response_format"]["json_schema"]["schema"]
+    assert "Show revenue" in user_prompt
+    assert "operator does not exist: date >= text" in user_prompt
+    assert '"type": "date"' in user_prompt
+    assert schema_output["$defs"]["QueryParameter"]["required"] == ["name", "type", "value"]
+    assert result.metadata.generation_stage == "sql_repair"
 
 
 @pytest.mark.parametrize(

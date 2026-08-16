@@ -180,4 +180,12 @@ class SQLAlchemyConnectorBase(SQLDatabaseConnector):
         return Prompt2InsightError(
             ErrorCode.QUERY_EXECUTION_FAILED,
             "The database could not execute the query.",
+            safe_detail=SQLAlchemyConnectorBase._safe_query_error_detail(error),
         )
+
+    @staticmethod
+    def _safe_query_error_detail(error: SQLAlchemyError) -> str:
+        """Keep the database diagnostic while excluding SQLAlchemy statements and parameters."""
+        original = getattr(error, "orig", None)
+        detail = str(original if original is not None else error)
+        return " ".join(detail.split())[:500]

@@ -102,6 +102,9 @@ def test_data_error_is_query_execution_failure_not_database_unavailable() -> Non
 
     assert normalized.code is ErrorCode.QUERY_EXECUTION_FAILED
     assert not normalized.retryable
+    assert normalized.safe_detail == (
+        "invalid input for query argument $1: str object has no attribute toordinal"
+    )
 
 
 def test_cost_error_category() -> None:

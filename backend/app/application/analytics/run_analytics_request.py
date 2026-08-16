@@ -1,11 +1,15 @@
+import json
 import logging
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
-from app.application.analytics.answer_grounding_context import build_answer_grounding_context
-from app.application.analytics.answer_validation import validate_answer_output
-from app.application.analytics.execute_query_plan import QueryPlanExecutor
+from app.application.analytics.answer_fallback import deterministic_answer
+from app.application.analytics.answer_validation import (
+    validate_answer_output,
+    validate_chart_specification,
+)
+from app.application.analytics.execute_query_plan import ExecutedPlan, QueryPlanExecutor
 from app.application.analytics.resolve_language import resolve_response_language
 from app.core.config import Settings
 from app.core.errors import ErrorCode, Prompt2InsightError
@@ -13,8 +17,8 @@ from app.domain.analytics.models import (
     AnalyticsRequest,
     AnalyticsResponse,
     AnalyticsStatus,
-    AnswerGroundingContext,
     AnswerOutput,
+    ModelExecutionMetadata,
     QueryPlan,
     ResultTable,
 )
@@ -35,6 +39,20 @@ class PlanningContext:
     schema_snapshot_id: UUID
     connection_profile_id: UUID | None = None
     credential_reference: str | None = None
+
+
+@dataclass(frozen=True)
+class _ExecutionOutcome:
+    execution: ExecutedPlan
+    plan_result: GenerationResult[QueryPlan]
+    warnings: list[str]
+
+
+@dataclass(frozen=True)
+class _AnswerOutcome:
+    output: AnswerOutput
+    metadata: ModelExecutionMetadata | None
+    warnings: list[str]
 
 
 class AnalyticsRequestStore(Protocol):
@@ -63,6 +81,18 @@ class QueryPlanner(Protocol):
         catalog: AnalyticsCatalog,
         model_group: ModelGroup[QueryPlan],
         schema_snapshot: SchemaSnapshot | None = None,
+    ) -> GenerationResult[QueryPlan]: ...
+
+    async def repair(
+        self,
+        *,
+        question: str,
+        dialect: SQLDialect,
+        catalog: AnalyticsCatalog,
+        schema_snapshot: SchemaSnapshot,
+        failed_plan: QueryPlan,
+        database_error: str,
+        model_group: ModelGroup[QueryPlan],
     ) -> GenerationResult[QueryPlan]: ...
 
 
@@ -142,25 +172,25 @@ class AnalyticsRequestService:
         context = await self._planning_context_store.get_planning_context(conversation_id)
         planner_metadata = None
         try:
-            result = await self._planner.plan(
+            plan_result = await self._planner.plan(
                 question=request.question,
                 dialect=context.dialect,
                 catalog=context.catalog,
                 schema_snapshot=context.schema_snapshot,
                 model_group=self._planner_model_group,
             )
-            planner_metadata = result.metadata
+            planner_metadata = plan_result.metadata
             logger.debug(
                 "Planner produced plan request_id=%s status=%s metric_ids=%s dimension_ids=%s "
                 "database_dialect=%s",
                 request.request_id,
-                result.output.status,
-                result.output.metric_ids,
-                result.output.dimension_ids,
-                result.output.database_dialect.value,
+                plan_result.output.status,
+                plan_result.output.metric_ids,
+                plan_result.output.dimension_ids,
+                plan_result.output.database_dialect.value,
             )
-            if result.output.status != "ready":
-                response = self._planner_response(request=request, result=result)
+            if plan_result.output.status != "ready":
+                response = self._planner_response(request=request, result=plan_result)
             elif (
                 self._query_executor is None
                 or self._connector_resolver is None
@@ -170,39 +200,42 @@ class AnalyticsRequestService:
             else:
                 connector = await self._connector_resolver.connect(context)
                 try:
-                    execution = await self._query_executor.execute(
-                        plan=result.output,
-                        schema_snapshot=context.schema_snapshot,
+                    execution_outcome = await self._execute_with_repair(
+                        request=request,
+                        plan_result=plan_result,
+                        context=context,
                         connector=connector,
-                        settings=self._settings,
                     )
                 finally:
                     await connector.close()
+
+                plan_result = execution_outcome.plan_result
+                planner_metadata = plan_result.metadata
+                execution = execution_outcome.execution
                 table = self._query_executor.result_table(execution.result)
-                grounding_context = build_answer_grounding_context(
-                    plan=result.output,
-                    executed_sql=execution.validated.normalized_sql,
+                execution_context = _answer_execution_context(
+                    plan_result.output, execution.validated.normalized_sql
                 )
-                answer_output = AnswerOutput(answer="")
-                answer_metadata = None
-                if execution.result.row_count:
-                    if self._answerer is None or self._answer_model_group is None:
-                        raise RuntimeError("Production answer dependencies are not configured.")
-                    answer_result = await self._answerer.generate(
-                        model_group=self._answer_model_group,
-                        system_prompt=_answer_system_prompt(result.output.response_language),
-                        user_prompt=_answer_user_prompt(request.question, table, grounding_context),
-                        generation_stage="answer",
-                        database_dialect=context.dialect,
+                if execution.result.row_count == 0:
+                    answer_outcome = _AnswerOutcome(
+                        output=AnswerOutput(
+                            answer=deterministic_answer(
+                                table, plan_result.output.response_language
+                            )
+                        ),
+                        metadata=None,
+                        warnings=[],
                     )
-                    validate_answer_output(
-                        answer_result.output,
-                        table,
-                        grounding_context=grounding_context,
-                        request_context=request.question,
+                else:
+                    answer_outcome = await self._answer_with_recovery(
+                        request=request,
+                        language=plan_result.output.response_language,
+                        dialect=context.dialect,
+                        table=table,
+                        execution_context=execution_context,
                     )
-                    answer_output = answer_result.output
-                    answer_metadata = answer_result.metadata
+
+                answer_output = answer_outcome.output
                 response = AnalyticsResponse(
                     status=(
                         AnalyticsStatus.EMPTY_RESULT
@@ -210,23 +243,25 @@ class AnalyticsRequestService:
                         else AnalyticsStatus.SUCCESS
                     ),
                     request_id=request.request_id,
-                    language=result.output.response_language,
+                    language=plan_result.output.response_language,
                     answer=answer_output.answer or None,
                     insights=answer_output.insights,
                     table=table,
                     chart=answer_output.chart,
                     sql=execution.validated.normalized_sql,
-                    query_plan=result.output,
+                    query_plan=plan_result.output,
                     warnings=[
                         *answer_output.warnings,
+                        *execution_outcome.warnings,
+                        *answer_outcome.warnings,
                         *(
-                            [_truncation_warning(result.output.response_language)]
+                            [_truncation_warning(plan_result.output.response_language)]
                             if execution.result.truncated
                             else []
                         ),
                     ],
-                    model_metadata=result.metadata,
-                    answer_model_metadata=answer_metadata,
+                    model_metadata=plan_result.metadata,
+                    answer_model_metadata=answer_outcome.metadata,
                 )
         except Prompt2InsightError as exc:
             cause = exc.__cause__ or exc
@@ -254,13 +289,181 @@ class AnalyticsRequestService:
             planning_context=context,
         )
 
+    async def _execute_with_repair(
+        self,
+        *,
+        request: AnalyticsRequest,
+        plan_result: GenerationResult[QueryPlan],
+        context: PlanningContext,
+        connector: SQLDatabaseConnector,
+    ) -> _ExecutionOutcome:
+        assert self._query_executor is not None
+        assert self._settings is not None
+        try:
+            execution = await self._query_executor.execute(
+                plan=plan_result.output,
+                schema_snapshot=context.schema_snapshot,
+                connector=connector,
+                settings=self._settings,
+            )
+            return _ExecutionOutcome(execution, plan_result, [])
+        except Prompt2InsightError as exc:
+            if exc.code is not ErrorCode.QUERY_EXECUTION_FAILED:
+                raise
+
+            assert self._planner is not None
+            assert self._planner_model_group is not None
+            logger.warning(
+                "Recoverable SQL execution failure request_id=%s error_code=%s detail=%s",
+                request.request_id,
+                exc.code.value,
+                exc.safe_detail or exc.message,
+            )
+            repair_result = await self._planner.repair(
+                question=request.question,
+                dialect=context.dialect,
+                catalog=context.catalog,
+                schema_snapshot=context.schema_snapshot,
+                failed_plan=plan_result.output,
+                database_error=exc.safe_detail or exc.message,
+                model_group=self._planner_model_group,
+            )
+            if repair_result.output.status != "ready" or repair_result.output.sql is None:
+                raise Prompt2InsightError(
+                    ErrorCode.QUERY_EXECUTION_FAILED,
+                    "The query could not be repaired after its execution error.",
+                ) from exc
+            execution = await self._query_executor.execute(
+                plan=repair_result.output,
+                schema_snapshot=context.schema_snapshot,
+                connector=connector,
+                settings=self._settings,
+            )
+            return _ExecutionOutcome(
+                execution,
+                repair_result,
+                [_sql_repair_warning(repair_result.output.response_language)],
+            )
+
+    async def _answer_with_recovery(
+        self,
+        *,
+        request: AnalyticsRequest,
+        language: str,
+        dialect: SQLDialect,
+        table: ResultTable,
+        execution_context: str,
+    ) -> _AnswerOutcome:
+        fallback = AnswerOutput(answer=deterministic_answer(table, language))
+        if self._answerer is None or self._answer_model_group is None:
+            return _AnswerOutcome(fallback, None, [_answer_fallback_warning(language)])
+
+        user_prompt = _answer_user_prompt(request.question, table, execution_context)
+        try:
+            first = await self._answerer.generate(
+                model_group=self._answer_model_group,
+                system_prompt=_answer_system_prompt(language),
+                user_prompt=user_prompt,
+                generation_stage="answer",
+                database_dialect=dialect,
+            )
+        except Prompt2InsightError as exc:
+            self._log_answer_recovery(request.request_id, exc, "generation")
+            return _AnswerOutcome(fallback, None, [_answer_fallback_warning(language)])
+
+        try:
+            validate_answer_output(
+                first.output,
+                table,
+                request_context=request.question,
+                execution_context=execution_context,
+            )
+        except Prompt2InsightError as first_failure:
+            self._log_answer_recovery(request.request_id, first_failure, "validation")
+            try:
+                regenerated = await self._answerer.generate(
+                    model_group=self._answer_model_group,
+                    system_prompt=_answer_regeneration_system_prompt(language),
+                    user_prompt=(
+                        f"{user_prompt}\n\nValidation feedback:\n{first_failure.message}\n"
+                        "Regenerate the answer once."
+                    ),
+                    generation_stage="answer_regeneration",
+                    database_dialect=dialect,
+                )
+            except Prompt2InsightError as regeneration_failure:
+                self._log_answer_recovery(
+                    request.request_id, regeneration_failure, "regeneration"
+                )
+                return _AnswerOutcome(
+                    fallback, first.metadata, [_answer_fallback_warning(language)]
+                )
+            try:
+                validate_answer_output(
+                    regenerated.output,
+                    table,
+                    request_context=request.question,
+                    execution_context=execution_context,
+                )
+            except Prompt2InsightError as second_failure:
+                self._log_answer_recovery(
+                    request.request_id, second_failure, "second_validation"
+                )
+                return _AnswerOutcome(
+                    fallback, regenerated.metadata, [_answer_fallback_warning(language)]
+                )
+            return self._validated_chart_outcome(
+                regenerated,
+                table,
+                [_answer_regenerated_warning(language)],
+                request.request_id,
+                language,
+            )
+
+        return self._validated_chart_outcome(first, table, [], request.request_id, language)
+
+    @staticmethod
+    def _validated_chart_outcome(
+        result: GenerationResult[AnswerOutput],
+        table: ResultTable,
+        warnings: list[str],
+        request_id: UUID,
+        language: str,
+    ) -> _AnswerOutcome:
+        try:
+            validate_chart_specification(result.output.chart, table)
+        except Prompt2InsightError as exc:
+            logger.warning(
+                "Chart omitted after validation request_id=%s error_code=%s detail=%s",
+                request_id,
+                exc.code.value,
+                exc.message,
+            )
+            return _AnswerOutcome(
+                result.output.model_copy(update={"chart": None}),
+                result.metadata,
+                [_chart_warning(language), *warnings],
+            )
+        return _AnswerOutcome(result.output, result.metadata, warnings)
+
+    @staticmethod
+    def _log_answer_recovery(
+        request_id: UUID, error: Prompt2InsightError, stage: str
+    ) -> None:
+        logger.warning(
+            "Answer recovery request_id=%s stage=%s error_code=%s detail=%s",
+            request_id,
+            stage,
+            error.code.value,
+            error.message,
+        )
+
     @staticmethod
     def _planner_response(
         *, request: AnalyticsRequest, result: GenerationResult[QueryPlan]
     ) -> AnalyticsResponse:
         plan = result.output
         status = {
-            "ready": AnalyticsStatus.PLANNED,
             "needs_clarification": AnalyticsStatus.NEEDS_CLARIFICATION,
             "unsupported": AnalyticsStatus.UNSUPPORTED,
         }[plan.status]
@@ -269,11 +472,6 @@ class AnalyticsRequestService:
             request_id=request.request_id,
             language=plan.response_language,
             answer=plan.clarification_question if plan.status == "needs_clarification" else None,
-            warnings=(
-                ["Query plan generated; SQL execution is pending Step 5."]
-                if plan.status == "ready"
-                else []
-            ),
             query_plan=plan,
             model_metadata=result.metadata,
         )
@@ -284,25 +482,73 @@ class AnalyticsRequestService:
 
 def _answer_system_prompt(language: str) -> str:
     return f"""You are the Prompt2Insight answer writer. Respond in {language}.
-Use the executed result table for analytical facts and numeric results. You may mention the
-executed query context supplied by the user, such as its date range, filter constraints, or
-top-N limit, but never present a filter value as a measured result. Do not calculate, estimate,
-infer, or invent numbers. Keep the answer concise.
-Preserve the exact returned text of categorical and entity values; do not rename, abbreviate,
-translate, or otherwise alter identifiers or product names.
-You may propose a chart only by referencing exact result-table column names in x_column and
-y_columns. Never include data points or values in a chart specification. Localize the answer,
-chart title, warnings, and empty-state wording to the requested language. Return only the
-required structured JSON result."""
+Use result values exactly for analytical claims. Do not invent numerical analytical facts. You
+may naturally mention the user's requested filters, dates, years, categories, locations, and
+top-N context. Use the executed query/filter context and result rows supplied below. Keep the
+answer concise. Preserve exact returned categorical and entity text; do not translate or rename
+identifiers or product names. You may propose a chart only with exact result column names in
+x_column and y_columns, and must not invent chart data. Return only the required structured JSON
+result."""
 
 
-def _answer_user_prompt(
-    question: str, table: ResultTable, grounding_context: AnswerGroundingContext
-) -> str:
+def _answer_regeneration_system_prompt(language: str) -> str:
     return (
-        f"User question:\n{question}\n\nExecuted query context (JSON):\n"
-        f"{grounding_context.model_dump_json()}\n\nExecuted result table (JSON):\n"
+        f"{_answer_system_prompt(language)}\n"
+        "The prior answer failed grounding validation. Apply the supplied validation feedback "
+        "and return one corrected structured answer using exact result values."
+    )
+
+
+def _answer_execution_context(plan: QueryPlan, executed_sql: str) -> str:
+    return json.dumps(
+        {
+            "executed_sql": executed_sql,
+            "interpretation": plan.interpretation,
+            "filters": [item.model_dump(mode="json") for item in plan.filters],
+            "parameters": [item.model_dump(mode="json") for item in plan.parameters],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _answer_user_prompt(question: str, table: ResultTable, execution_context: str) -> str:
+    return (
+        f"User question:\n{question}\n\nExecuted query/filter context (JSON):\n"
+        f"{execution_context}\n\nExecuted result columns and rows (JSON):\n"
         f"{table.model_dump_json()}"
+    )
+
+
+def _sql_repair_warning(language: str) -> str:
+    return (
+        "تم إصلاح الاستعلام وإعادة التحقق منه قبل التنفيذ."
+        if language == "ar"
+        else "The query was repaired and fully revalidated before execution."
+    )
+
+
+def _answer_regenerated_warning(language: str) -> str:
+    return (
+        "تمت إعادة إنشاء الإجابة مرة واحدة بعد فشل التحقق."
+        if language == "ar"
+        else "The answer was regenerated once after validation failed."
+    )
+
+
+def _answer_fallback_warning(language: str) -> str:
+    return (
+        "تعذر إنشاء إجابة موثوقة؛ تم استخدام ملخص حتمي للنتيجة."
+        if language == "ar"
+        else "A reliable generated answer was unavailable; a deterministic result summary was used."
+    )
+
+
+def _chart_warning(language: str) -> str:
+    return (
+        "تم حذف الرسم البياني غير الصالح؛ تظل نتيجة الاستعلام متاحة."
+        if language == "ar"
+        else "The invalid chart was omitted; the query result remains available."
     )
 
 
