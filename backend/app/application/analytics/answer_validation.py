@@ -14,6 +14,11 @@ _NUMBER = re.compile(
 _ARABIC_DIGITS = {**{0x0660 + index: str(index) for index in range(10)}, 0x066B: "."}
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}[T ].+$")
+_REQUEST_CONTEXT_NUMBER = re.compile(
+    r"\b(?:last|past)\s+[0-9\u0660-\u0669][0-9\u0660-\u0669,]*"
+    r"\s+(?:day|week|month|year)s?\b",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +32,7 @@ def validate_answer_output(
     table: ResultTable,
     *,
     grounding_context: AnswerGroundingContext | None = None,
+    request_context: str | None = None,
 ) -> None:
     """Ensure an answer can only refer to columns and numeric values actually returned."""
     if output.chart is not None:
@@ -60,7 +66,13 @@ def validate_answer_output(
     grounded_text_spans = _find_exact_spans(text, result_text_values)
     grounded_date_spans = _find_exact_spans(text, result_date_values)
     grounded_context_spans = _context_grounded_spans(text, grounding_context)
-    grounded_spans = [*grounded_text_spans, *grounded_date_spans, *grounded_context_spans]
+    grounded_request_spans = _request_context_spans(text, request_context)
+    grounded_spans = [
+        *grounded_text_spans,
+        *grounded_date_spans,
+        *grounded_context_spans,
+        *grounded_request_spans,
+    ]
     for match in _NUMBER.finditer(text):
         token_span = _numeric_token_span(match.span(), text)
         if _is_within_grounded_span(token_span, grounded_spans):
@@ -90,16 +102,11 @@ def _context_grounded_spans(
         return []
     spans: list[tuple[int, int]] = []
     for date_range in context.date_ranges:
-        start_year = date.fromisoformat(date_range.start).year
-        end_year = date.fromisoformat(date_range.end).year
-        spans.extend(
-            _find_pattern_spans(
-                text,
-                rf"(?:from\s+{start_year}\s+(?:to|through)\s+{end_year}"
-                rf"|between\s+{start_year}\s+and\s+{end_year}"
-                rf"|من\s+{start_year}\s+(?:إلى|الى)\s+{end_year})",
-            )
-        )
+        for year in range(
+            date.fromisoformat(date_range.start).year,
+            date.fromisoformat(date_range.end).year + 1,
+        ):
+            spans.extend(_find_pattern_spans(text, rf"(?<!\d){year}(?!\d)"))
     if context.top_n is not None:
         spans.extend(
             _find_pattern_spans(
@@ -121,6 +128,17 @@ def _context_grounded_spans(
     return spans
 
 
+def _request_context_spans(text: str, request_context: str | None) -> list[tuple[int, int]]:
+    """Allow relative time-window phrasing copied from the user's request."""
+    if request_context is None:
+        return []
+    phrases = {
+        match.group()
+        for match in _REQUEST_CONTEXT_NUMBER.finditer(request_context)
+    }
+    return _find_exact_spans_case_insensitive(text, phrases)
+
+
 def _find_pattern_spans(text: str, pattern: str) -> list[tuple[int, int]]:
     return [match.span() for match in re.finditer(pattern, text, flags=re.IGNORECASE)]
 
@@ -138,6 +156,19 @@ def _find_exact_spans(text: str, values: set[str]) -> list[tuple[int, int]]:
     for value in values:
         start = 0
         while (start := text.find(value, start)) != -1:
+            end = start + len(value)
+            spans.append((start, end))
+            start += 1
+    return spans
+
+
+def _find_exact_spans_case_insensitive(text: str, values: set[str]) -> list[tuple[int, int]]:
+    lowered_text = text.casefold()
+    spans: list[tuple[int, int]] = []
+    for value in values:
+        start = 0
+        lowered_value = value.casefold()
+        while (start := lowered_text.find(lowered_value, start)) != -1:
             end = start + len(value)
             spans.append((start, end))
             start += 1

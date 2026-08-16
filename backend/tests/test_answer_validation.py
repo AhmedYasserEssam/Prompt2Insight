@@ -35,7 +35,7 @@ def test_rejects_invented_numeric_values() -> None:
     assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
 
 
-def test_date_range_context_grounds_years_without_grounding_invented_metrics() -> None:
+def test_date_range_context_grounds_standalone_years_without_grounding_invented_metrics() -> None:
     context = AnswerGroundingContext(
         date_ranges=[DateRangeGrounding(start="2015-01-01", end="2016-12-31")]
     )
@@ -47,7 +47,7 @@ def test_date_range_context_grounds_years_without_grounding_invented_metrics() -
     validate_answer_output(
         AnswerOutput(
             answer=(
-                "From 2015 to 2016, Cisco TelePresence System EX90 Videoconferencing Unit "
+                "In 2016, Cisco TelePresence System EX90 Videoconferencing Unit "
                 "had the highest sales at 22,638.48."
             )
         ),
@@ -57,11 +57,28 @@ def test_date_range_context_grounds_years_without_grounding_invented_metrics() -
 
     with pytest.raises(Prompt2InsightError) as raised:
         validate_answer_output(
-            AnswerOutput(answer="From 2015 to 2016, total sales were 999999."),
+            AnswerOutput(answer="In 2016, total sales were 999999."),
             table,
             grounding_context=context,
         )
     assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+
+
+def test_request_context_grounds_relative_time_window_but_not_fabricated_result() -> None:
+    table = ResultTable(columns=["total_sales"], rows=[[22638.48]])
+
+    validate_answer_output(
+        AnswerOutput(answer="Over the last 3 months, sales were 22,638.48."),
+        table,
+        request_context="What were sales in the last 3 months?",
+    )
+
+    with pytest.raises(Prompt2InsightError):
+        validate_answer_output(
+            AnswerOutput(answer="Over the last 3 months, sales were 99,999."),
+            table,
+            request_context="What were sales in the last 3 months?",
+        )
 
 
 def test_top_n_context_grounds_only_a_top_n_phrase() -> None:

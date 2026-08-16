@@ -199,6 +199,7 @@ class AnalyticsRequestService:
                         answer_result.output,
                         table,
                         grounding_context=grounding_context,
+                        request_context=request.question,
                     )
                     answer_output = answer_result.output
                     answer_metadata = answer_result.metadata
