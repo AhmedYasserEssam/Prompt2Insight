@@ -2,6 +2,7 @@ from datetime import date
 
 import pytest
 
+from app.application.analytics.answer_grounding_context import build_answer_grounding_context
 from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.core.config import Settings
 from app.core.errors import ErrorCode, Prompt2InsightError
@@ -138,6 +139,57 @@ SAFE_SQL = (
     "ON analytics.orders.id = analytics.order_items.order_id "
     "GROUP BY analytics.orders.region"
 )
+
+
+def test_answer_context_uses_executed_half_open_dates_and_explicit_limit_only() -> None:
+    planned = plan(
+        "SELECT analytics.sales.product_name FROM analytics.sales "
+        "WHERE analytics.sales.order_date >= :start_date "
+        "AND analytics.sales.order_date < :end_date LIMIT 5",
+        parameters=[
+            {"name": "start_date", "type": "date", "value": "2015-01-01"},
+            {"name": "end_date", "type": "date", "value": "2017-01-01"},
+            {"name": "unused_number", "type": "integer", "value": "999999"},
+        ],
+    )
+
+    context = build_answer_grounding_context(
+        plan=planned,
+        executed_sql=(
+            "SELECT analytics.sales.product_name FROM analytics.sales "
+            "WHERE analytics.sales.order_date >= :start_date "
+            "AND analytics.sales.order_date < :end_date LIMIT 5"
+        ),
+    )
+
+    assert context.model_dump() == {
+        "date_ranges": [{"start": "2015-01-01", "end": "2016-12-31"}],
+        "numeric_filters": [],
+        "top_n": 5,
+    }
+
+
+def test_answer_context_keeps_only_executed_numeric_filter_values() -> None:
+    planned = plan(
+        "SELECT analytics.sales.sales FROM analytics.sales "
+        "WHERE analytics.sales.sales > :minimum_sales",
+        parameters=[
+            {"name": "minimum_sales", "type": "number", "value": "1000.0"},
+            {"name": "question_claim", "type": "number", "value": "999999.0"},
+        ],
+    )
+
+    context = build_answer_grounding_context(
+        plan=planned,
+        executed_sql=(
+            "SELECT analytics.sales.sales FROM analytics.sales "
+            "WHERE analytics.sales.sales > :minimum_sales"
+        ),
+    )
+
+    assert [item.model_dump() for item in context.numeric_filters] == [
+        {"field": "sales", "operator": "gt", "value": 1000.0}
+    ]
 
 
 async def test_schema_drift_stops_before_explain_and_execution() -> None:

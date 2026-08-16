@@ -1,6 +1,5 @@
 from datetime import date, datetime
 from enum import StrEnum
-from math import isfinite
 from re import compile as re_compile
 from typing import Any, Literal
 from uuid import UUID
@@ -9,7 +8,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    StrictBool,
     StrictFloat,
     StrictInt,
     StrictStr,
@@ -43,21 +41,25 @@ class AnalyticsRequest(BaseModel):
     response_language: ResponseLanguage = ResponseLanguage.AUTO
 
 
+type QueryParameterValue = StrictStr | None
+
+
 class QueryFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dimension_id: str
     operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "in", "between"]
-    value: Any
+    value: QueryParameterValue
 
 
-type QueryParameterValue = StrictStr | StrictInt | StrictFloat | StrictBool | None
 type QueryParameterBinding = str | int | float | bool | date | datetime | None
 
 _ISO_DATE = re_compile(r"\d{4}-\d{2}-\d{2}")
 _ISO_DATETIME = re_compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?"
 )
+_CANONICAL_INTEGER = re_compile(r"-?(?:0|[1-9]\d*)")
+_CANONICAL_NUMBER = re_compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?")
 
 
 class QueryParameter(BaseModel):
@@ -70,14 +72,20 @@ class QueryParameter(BaseModel):
     def binding_value(self) -> QueryParameterBinding:
         if self.type == "string" and isinstance(self.value, str):
             return self.value
-        if self.type == "integer" and type(self.value) is int:
-            return self.value
-        if self.type == "number" and type(self.value) in {int, float}:
-            if isinstance(self.value, float) and not isfinite(self.value):
-                raise self._invalid_value()
-            return self.value
-        if self.type == "boolean" and type(self.value) is bool:
-            return self.value
+        if (
+            self.type == "integer"
+            and isinstance(self.value, str)
+            and _CANONICAL_INTEGER.fullmatch(self.value)
+        ):
+            return int(self.value)
+        if (
+            self.type == "number"
+            and isinstance(self.value, str)
+            and _CANONICAL_NUMBER.fullmatch(self.value)
+        ):
+            return float(self.value)
+        if self.type == "boolean" and self.value in {"true", "false"}:
+            return self.value == "true"
         if self.type == "null" and self.value is None:
             return None
         if self.type == "date" and isinstance(self.value, str) and _ISO_DATE.fullmatch(self.value):
@@ -145,6 +153,31 @@ class ResultTable(BaseModel):
 
     columns: list[str]
     rows: list[list[Any]]
+
+
+class DateRangeGrounding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: str
+    end: str
+
+
+class NumericFilterGrounding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field: str
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte"]
+    value: StrictInt | StrictFloat
+
+
+class AnswerGroundingContext(BaseModel):
+    """Executed query context that may be mentioned without becoming a result fact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    date_ranges: list[DateRangeGrounding] = Field(default_factory=list)
+    numeric_filters: list[NumericFilterGrounding] = Field(default_factory=list)
+    top_n: StrictInt | None = None
 
 
 class AnswerOutput(BaseModel):

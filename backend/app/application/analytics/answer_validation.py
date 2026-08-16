@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.core.errors import ErrorCode, Prompt2InsightError
-from app.domain.analytics.models import AnswerOutput, ResultTable
+from app.domain.analytics.models import AnswerGroundingContext, AnswerOutput, ResultTable
 
 _NUMBER = re.compile(
     r"(?<![\w.])-?[0-9\u0660-\u0669][0-9\u0660-\u0669,]*"
@@ -22,7 +22,12 @@ class _NumericToken:
     is_percentage: bool = False
 
 
-def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
+def validate_answer_output(
+    output: AnswerOutput,
+    table: ResultTable,
+    *,
+    grounding_context: AnswerGroundingContext | None = None,
+) -> None:
     """Ensure an answer can only refer to columns and numeric values actually returned."""
     if output.chart is not None:
         references = [output.chart.x_column, *output.chart.y_columns]
@@ -54,9 +59,11 @@ def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
     )
     grounded_text_spans = _find_exact_spans(text, result_text_values)
     grounded_date_spans = _find_exact_spans(text, result_date_values)
-    grounded_spans = [*grounded_text_spans, *grounded_date_spans]
+    grounded_context_spans = _context_grounded_spans(text, grounding_context)
+    grounded_spans = [*grounded_text_spans, *grounded_date_spans, *grounded_context_spans]
     for match in _NUMBER.finditer(text):
-        if _is_within_grounded_span(match.span(), grounded_spans):
+        token_span = _numeric_token_span(match.span(), text)
+        if _is_within_grounded_span(token_span, grounded_spans):
             continue
         raw_token = match.group()
         token = _as_numeric_token(raw_token)
@@ -67,6 +74,55 @@ def validate_answer_output(output: AnswerOutput, table: ResultTable) -> None:
                 f"The answer contains an ungrounded numeric value: {raw_token!r} "
                 f"(normalized={normalized!s}).",
             )
+
+
+def _numeric_token_span(token_span: tuple[int, int], text: str) -> tuple[int, int]:
+    start, end = token_span
+    while end > start and text[end - 1] in {",", "\u060c"}:
+        end -= 1
+    return start, end
+
+
+def _context_grounded_spans(
+    text: str, context: AnswerGroundingContext | None
+) -> list[tuple[int, int]]:
+    if context is None:
+        return []
+    spans: list[tuple[int, int]] = []
+    for date_range in context.date_ranges:
+        start_year = date.fromisoformat(date_range.start).year
+        end_year = date.fromisoformat(date_range.end).year
+        spans.extend(
+            _find_pattern_spans(
+                text,
+                rf"(?:from\s+{start_year}\s+(?:to|through)\s+{end_year}"
+                rf"|between\s+{start_year}\s+and\s+{end_year}"
+                rf"|من\s+{start_year}\s+(?:إلى|الى)\s+{end_year})",
+            )
+        )
+    if context.top_n is not None:
+        spans.extend(
+            _find_pattern_spans(
+                text, rf"(?:\btop\s+{context.top_n}\b|(?:أعلى|أفضل)\s+{context.top_n})"
+            )
+        )
+    for numeric_filter in context.numeric_filters:
+        value = re.escape(str(numeric_filter.value))
+        field = re.escape(numeric_filter.field.replace("_", " "))
+        spans.extend(
+            _find_pattern_spans(
+                text,
+                rf"(?:\b{field}\b\s*(?:=|is|of|at least|more than|greater than|over|above|"
+                rf"less than|under|below)\s*{value}\b|(?:at least|more than|greater than|"
+                rf"over|above|less than|under|below|أكثر من|أكبر من|على الأقل|لا يقل عن|أقل من|دون)"
+                rf"\s+{value}\b)",
+            )
+        )
+    return spans
+
+
+def _find_pattern_spans(text: str, pattern: str) -> list[tuple[int, int]]:
+    return [match.span() for match in re.finditer(pattern, text, flags=re.IGNORECASE)]
 
 
 def _as_grounded_text_value(value: Any) -> str | None:

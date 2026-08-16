@@ -4,7 +4,14 @@ import pytest
 
 from app.application.analytics.answer_validation import validate_answer_output
 from app.core.errors import ErrorCode, Prompt2InsightError
-from app.domain.analytics.models import AnswerOutput, ChartSpecification, ResultTable
+from app.domain.analytics.models import (
+    AnswerGroundingContext,
+    AnswerOutput,
+    ChartSpecification,
+    DateRangeGrounding,
+    NumericFilterGrounding,
+    ResultTable,
+)
 
 
 def test_accepts_answer_and_chart_references_grounded_in_result_table() -> None:
@@ -26,6 +33,90 @@ def test_rejects_invented_numeric_values() -> None:
         )
 
     assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+
+
+def test_date_range_context_grounds_years_without_grounding_invented_metrics() -> None:
+    context = AnswerGroundingContext(
+        date_ranges=[DateRangeGrounding(start="2015-01-01", end="2016-12-31")]
+    )
+    table = ResultTable(
+        columns=["product_name", "total_sales"],
+        rows=[["Cisco TelePresence System EX90 Videoconferencing Unit", 22638.48]],
+    )
+
+    validate_answer_output(
+        AnswerOutput(
+            answer=(
+                "From 2015 to 2016, Cisco TelePresence System EX90 Videoconferencing Unit "
+                "had the highest sales at 22,638.48."
+            )
+        ),
+        table,
+        grounding_context=context,
+    )
+
+    with pytest.raises(Prompt2InsightError) as raised:
+        validate_answer_output(
+            AnswerOutput(answer="From 2015 to 2016, total sales were 999999."),
+            table,
+            grounding_context=context,
+        )
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+
+
+def test_top_n_context_grounds_only_a_top_n_phrase() -> None:
+    context = AnswerGroundingContext(top_n=5)
+    table = ResultTable(columns=["product_name"], rows=[["Cisco TelePresence"]])
+
+    validate_answer_output(
+        AnswerOutput(answer="The top 5 products include Cisco TelePresence."),
+        table,
+        grounding_context=context,
+    )
+
+    with pytest.raises(Prompt2InsightError):
+        validate_answer_output(
+            AnswerOutput(answer="Cisco TelePresence generated 5 in sales."),
+            table,
+            grounding_context=context,
+        )
+
+
+def test_numeric_filter_context_requires_contextual_filter_wording() -> None:
+    context = AnswerGroundingContext(
+        numeric_filters=[NumericFilterGrounding(field="sales", operator="gt", value=1000)]
+    )
+    table = ResultTable(columns=["total_sales"], rows=[[5000]])
+
+    validate_answer_output(
+        AnswerOutput(answer="For sales over 1000, total sales were 5000."),
+        table,
+        grounding_context=context,
+    )
+
+    with pytest.raises(Prompt2InsightError):
+        validate_answer_output(
+            AnswerOutput(answer="Total sales were 1000."),
+            table,
+            grounding_context=context,
+        )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "من 2015 إلى 2016، بلغت المبيعات 22638.48.",
+        "From 2015 to 2016, بلغت المبيعات 22638.48.",
+    ],
+)
+def test_arabic_and_code_switched_date_context_grounds_years(answer: str) -> None:
+    validate_answer_output(
+        AnswerOutput(answer=answer),
+        ResultTable(columns=["total_sales"], rows=[[22638.48]]),
+        grounding_context=AnswerGroundingContext(
+            date_ranges=[DateRangeGrounding(start="2015-01-01", end="2016-12-31")]
+        ),
+    )
 
 
 def test_rejects_ungrounded_numeric_token_with_internal_detail() -> None:

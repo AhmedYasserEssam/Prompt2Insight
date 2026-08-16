@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from app.application.analytics.answer_grounding_context import build_answer_grounding_context
 from app.application.analytics.answer_validation import validate_answer_output
 from app.application.analytics.execute_query_plan import QueryPlanExecutor
 from app.application.analytics.resolve_language import resolve_response_language
@@ -12,6 +13,7 @@ from app.domain.analytics.models import (
     AnalyticsRequest,
     AnalyticsResponse,
     AnalyticsStatus,
+    AnswerGroundingContext,
     AnswerOutput,
     QueryPlan,
     ResultTable,
@@ -177,6 +179,10 @@ class AnalyticsRequestService:
                 finally:
                     await connector.close()
                 table = self._query_executor.result_table(execution.result)
+                grounding_context = build_answer_grounding_context(
+                    plan=result.output,
+                    executed_sql=execution.validated.normalized_sql,
+                )
                 answer_output = AnswerOutput(answer="")
                 answer_metadata = None
                 if execution.result.row_count:
@@ -185,11 +191,15 @@ class AnalyticsRequestService:
                     answer_result = await self._answerer.generate(
                         model_group=self._answer_model_group,
                         system_prompt=_answer_system_prompt(result.output.response_language),
-                        user_prompt=_answer_user_prompt(request.question, table),
+                        user_prompt=_answer_user_prompt(request.question, table, grounding_context),
                         generation_stage="answer",
                         database_dialect=context.dialect,
                     )
-                    validate_answer_output(answer_result.output, table)
+                    validate_answer_output(
+                        answer_result.output,
+                        table,
+                        grounding_context=grounding_context,
+                    )
                     answer_output = answer_result.output
                     answer_metadata = answer_result.metadata
                 response = AnalyticsResponse(
@@ -273,8 +283,10 @@ class AnalyticsRequestService:
 
 def _answer_system_prompt(language: str) -> str:
     return f"""You are the Prompt2Insight answer writer. Respond in {language}.
-Use only the executed result table supplied by the user. Do not calculate, estimate, infer,
-or mention any number that is not literally present in that table. Keep the answer concise.
+Use the executed result table for analytical facts and numeric results. You may mention the
+executed query context supplied by the user, such as its date range, filter constraints, or
+top-N limit, but never present a filter value as a measured result. Do not calculate, estimate,
+infer, or invent numbers. Keep the answer concise.
 Preserve the exact returned text of categorical and entity values; do not rename, abbreviate,
 translate, or otherwise alter identifiers or product names.
 You may propose a chart only by referencing exact result-table column names in x_column and
@@ -283,8 +295,14 @@ chart title, warnings, and empty-state wording to the requested language. Return
 required structured JSON result."""
 
 
-def _answer_user_prompt(question: str, table: ResultTable) -> str:
-    return f"User question:\n{question}\n\nExecuted result table (JSON):\n{table.model_dump_json()}"
+def _answer_user_prompt(
+    question: str, table: ResultTable, grounding_context: AnswerGroundingContext
+) -> str:
+    return (
+        f"User question:\n{question}\n\nExecuted query context (JSON):\n"
+        f"{grounding_context.model_dump_json()}\n\nExecuted result table (JSON):\n"
+        f"{table.model_dump_json()}"
+    )
 
 
 def _truncation_warning(language: str) -> str:

@@ -34,6 +34,8 @@ def test_planner_prompt_treats_catalog_as_guidance_and_allows_derived_metrics() 
     assert "SELECT-only" in prompt
     assert "Parameterize user-supplied literal" in prompt
     assert "Every parameter must include its correct type" in prompt
+    assert 'integer "2018"' in prompt
+    assert 'boolean "true"' in prompt
     assert "schema column types to choose parameter types" in prompt
     assert "half-open intervals" in prompt
 
@@ -174,9 +176,28 @@ def test_query_plan_strict_schema_closes_parameters_object() -> None:
         "null",
     }
     parameter_value_schema = strict_schema["$defs"]["QueryParameterValue"]
-    parameter_value_types = {item["type"] for item in parameter_value_schema["anyOf"]}
-    assert parameter_value_types == {"string", "integer", "number", "boolean", "null"}
+    assert parameter_value_schema == {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert strict_schema["$defs"]["QueryFilter"]["properties"]["value"] == {
+        "$ref": "#/$defs/QueryParameterValue"
+    }
     assert_strict_object_nodes(strict_schema)
+    assert not _has_integer_number_overlap(strict_schema)
+
+
+def _has_integer_number_overlap(schema: object) -> bool:
+    if isinstance(schema, dict):
+        if "anyOf" in schema:
+            types = {
+                item.get("type")
+                for item in schema["anyOf"]
+                if isinstance(item, dict) and isinstance(item.get("type"), str)
+            }
+            if {"integer", "number"} <= types:
+                return True
+        return any(_has_integer_number_overlap(value) for value in schema.values())
+    if isinstance(schema, list):
+        return any(_has_integer_number_overlap(value) for value in schema)
+    return False
 
 
 def test_query_plan_without_parameters_produces_empty_bindings() -> None:
@@ -187,9 +208,9 @@ def test_query_plan_without_parameters_produces_empty_bindings() -> None:
     ("parameter_type", "value", "expected"),
     [
         ("string", "West", "West"),
-        ("integer", 42, 42),
-        ("number", 3.5, 3.5),
-        ("boolean", True, True),
+        ("integer", "42", 42),
+        ("number", "3.5", 3.5),
+        ("boolean", "true", True),
         ("null", None, None),
         ("date", "2015-01-01", date(2015, 1, 1)),
         ("datetime", "2015-01-01T12:30:00", datetime(2015, 1, 1, 12, 30)),
@@ -222,11 +243,12 @@ def test_query_plan_rejects_nested_parameter_values(value: object) -> None:
     ("parameter_type", "value"),
     [
         ("date", "not-a-date"),
-        ("date", 123),
+        ("date", "123"),
         ("datetime", "2015-01-01 12:30:00"),
         ("boolean", "West"),
-        ("integer", "2018"),
-        ("number", True),
+        ("integer", "12.5"),
+        ("integer", "abc"),
+        ("number", "abc"),
         ("null", "null"),
     ],
 )
@@ -273,6 +295,7 @@ async def test_planner_primary_failure_uses_fallback_with_strict_query_plan_sche
     for call in completions.calls:
         schema = call["response_format"]["json_schema"]["schema"]
         assert_strict_object_nodes(schema)
+        assert not _has_integer_number_overlap(schema)
     assert result.output.parameter_bindings() == {}
     assert result.metadata.fallback_used is True
 
@@ -330,6 +353,24 @@ async def test_both_provider_failures_are_reported_as_llm_unavailable() -> None:
         "answer-fallback",
         "answer-fallback",
     ]
+
+
+class SchemaRejection(Exception):
+    status_code = 400
+
+
+async def test_schema_http_400_is_not_classified_as_llm_unavailable() -> None:
+    gateway, _ = gateway_with(
+        [SchemaRejection("invalid JSON schema for response_format: integer_number_overlap")] * 4
+    )
+
+    with pytest.raises(Prompt2InsightError) as raised:
+        await gateway.generate(
+            model_group=planner_group(), system_prompt="system", user_prompt="question"
+        )
+
+    assert raised.value.code is ErrorCode.LLM_INVALID_OUTPUT
+    assert raised.value.retryable is False
 
 
 @pytest.mark.parametrize(

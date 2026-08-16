@@ -316,6 +316,8 @@ async def test_production_request_generates_a_grounded_answer_from_executed_rows
     assert response.answer_model_metadata == answerer.result.metadata
     assert answerer.calls[0]["model_group"].name == "answer"
     assert '[["Cairo",10]]' in answerer.calls[0]["user_prompt"]
+    assert '"date_ranges":[]' in answerer.calls[0]["user_prompt"]
+    assert "executed query context" in answerer.calls[0]["system_prompt"]
     assert "Preserve the exact returned text" in answerer.calls[0]["system_prompt"]
 
 

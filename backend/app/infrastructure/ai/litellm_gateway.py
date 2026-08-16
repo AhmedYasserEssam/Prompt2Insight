@@ -248,6 +248,11 @@ class VLLMGateway:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if _is_structured_schema_rejection(exc):
+                raise Prompt2InsightError(
+                    ErrorCode.LLM_INVALID_OUTPUT,
+                    "The model provider rejected the structured response schema.",
+                ) from exc
             raise Prompt2InsightError(
                 ErrorCode.LLM_UNAVAILABLE,
                 "The model gateway is unavailable.",
@@ -321,10 +326,13 @@ COUNT(DISTINCT ...), arithmetic, CASE, DATE_TRUNC, and EXTRACT. Use straightforw
 {dialect.value} SELECT-only SQL and {dialect.value} syntax. Parameterize user-supplied literal
 values. Every parameter must include its correct type: use string for text, integer for whole
 numbers, number for decimal values, boolean for true/false, date for YYYY-MM-DD, datetime for a
-narrow ISO-8601 timestamp such as 2026-08-14T10:30:00, and null only for null. Use schema column
-types to choose parameter types whenever possible; do not rely on SQL casts to repair parameter
-typing. For year ranges, prefer half-open intervals such as >= :start_date and < :end_date with
-date parameters. Do not execute SQL. Return only the required structured result. Use
+narrow ISO-8601 timestamp such as 2026-08-14T10:30:00, and null only for null. Every non-null
+parameter value must be encoded as a string: integer "2018", number "500.25", boolean "true" or
+"false", date "2015-01-01", datetime ISO-8601, and string literal text; use null only with a
+null value. The type controls backend interpretation. Use schema column types to choose parameter
+types whenever possible; do not rely on SQL casts to repair parameter typing. For year ranges,
+prefer half-open intervals such as >= :start_date and < :end_date with date parameters. Do not
+execute SQL. Return only the required structured result. Use
 needs_clarification only when the business intent is genuinely ambiguous, and unsupported when
 appropriate. The backend independently enforces physical schema access, read-only SQL, cost,
 timeout, and row limits."""
@@ -362,6 +370,18 @@ def _strict_json_schema(output_type: type[BaseModel]) -> dict[str, Any]:
     schema = output_type.model_json_schema()
     _require_all_object_properties(schema)
     return schema
+
+
+def _is_structured_schema_rejection(error: Exception) -> bool:
+    message = str(error).lower()
+    return getattr(error, "status_code", None) == 400 and any(
+        marker in message
+        for marker in (
+            "invalid json schema",
+            "response_format",
+            "integer_number_overlap",
+        )
+    )
 
 
 def _require_all_object_properties(schema: Any) -> None:
