@@ -2,7 +2,7 @@ import json
 from hashlib import sha256
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.analytics.run_analytics_request import PlanningContext
@@ -16,9 +16,187 @@ from app.persistence.models import (
     CatalogRevisionRecord,
     ConnectionProfileRecord,
     ConversationRecord,
+    MessageRecord,
     QueryExecutionRecord,
     SchemaSnapshotRecord,
 )
+
+
+class ConversationRepository:
+    """Persistence operations for conversations and their ordered messages."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    @staticmethod
+    def _validate_pagination(limit: int | None, offset: int) -> None:
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+
+    async def create_conversation(
+        self,
+        *,
+        connection_id: UUID | None,
+        title: str = "New conversation",
+        language: str = "auto",
+        context_state: dict[str, object] | None = None,
+    ) -> ConversationRecord:
+        async with self._session_factory() as session, session.begin():
+            record = ConversationRecord(
+                connection_profile_id=connection_id,
+                title=title,
+                language=language,
+                context_state=dict(context_state) if context_state is not None else {},
+            )
+            session.add(record)
+            await session.flush()
+            await session.refresh(record)
+            return record
+
+    async def list_conversations(
+        self,
+        *,
+        include_archived: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ConversationRecord]:
+        self._validate_pagination(limit, offset)
+        statement = select(ConversationRecord).order_by(
+            ConversationRecord.updated_at.desc(), ConversationRecord.id.desc()
+        )
+        if not include_archived:
+            statement = statement.where(ConversationRecord.archived_at.is_(None))
+        if limit is not None:
+            statement = statement.limit(limit)
+        if offset:
+            statement = statement.offset(offset)
+        async with self._session_factory() as session:
+            return list((await session.scalars(statement)).all())
+
+    async def get_conversation(
+        self, conversation_id: UUID, *, include_archived: bool = False
+    ) -> ConversationRecord | None:
+        async with self._session_factory() as session:
+            record = await session.get(ConversationRecord, conversation_id)
+            if record is None or (record.archived_at is not None and not include_archived):
+                return None
+            return record
+
+    async def update_conversation(
+        self,
+        conversation_id: UUID,
+        *,
+        title: str | None = None,
+        language: str | None = None,
+        summary: str | None = None,
+    ) -> ConversationRecord | None:
+        async with self._session_factory() as session, session.begin():
+            record = await session.get(ConversationRecord, conversation_id)
+            if record is None:
+                return None
+            if title is not None:
+                record.title = title
+            if language is not None:
+                record.language = language
+            if summary is not None:
+                record.summary = summary
+            record.updated_at = func.now()
+            await session.flush()
+            await session.refresh(record)
+            return record
+
+    async def archive_conversation(self, conversation_id: UUID) -> ConversationRecord | None:
+        async with self._session_factory() as session, session.begin():
+            record = await session.get(ConversationRecord, conversation_id)
+            if record is None:
+                return None
+            record.archived_at = func.now()
+            record.updated_at = func.now()
+            await session.flush()
+            await session.refresh(record)
+            return record
+
+    async def delete_conversation(self, conversation_id: UUID) -> bool:
+        async with self._session_factory() as session, session.begin():
+            record = await session.get(ConversationRecord, conversation_id)
+            if record is None:
+                return False
+            await session.delete(record)
+            await session.flush()
+            return True
+
+    async def add_message(
+        self,
+        *,
+        conversation_id: UUID,
+        role: str,
+        content: str,
+        message_metadata: dict[str, object] | None = None,
+    ) -> MessageRecord | None:
+        """Append a message while holding the parent row lock for sequence safety."""
+        async with self._session_factory() as session, session.begin():
+            conversation = await session.scalar(
+                select(ConversationRecord)
+                .where(ConversationRecord.id == conversation_id)
+                .with_for_update()
+            )
+            if conversation is None:
+                return None
+            latest_sequence = await session.scalar(
+                select(func.max(MessageRecord.sequence_number)).where(
+                    MessageRecord.conversation_id == conversation_id
+                )
+            )
+            record = MessageRecord(
+                conversation_id=conversation_id,
+                sequence_number=(latest_sequence or 0) + 1,
+                role=role,
+                content=content,
+                message_metadata=(dict(message_metadata) if message_metadata is not None else {}),
+            )
+            session.add(record)
+            conversation.updated_at = func.now()
+            await session.flush()
+            await session.refresh(record)
+            return record
+
+    async def list_messages(self, conversation_id: UUID) -> list[MessageRecord]:
+        statement = (
+            select(MessageRecord)
+            .where(MessageRecord.conversation_id == conversation_id)
+            .order_by(MessageRecord.sequence_number.asc(), MessageRecord.id.asc())
+        )
+        async with self._session_factory() as session:
+            return list((await session.scalars(statement)).all())
+
+    async def get_recent_messages(
+        self, conversation_id: UUID, *, limit: int
+    ) -> list[MessageRecord]:
+        self._validate_pagination(limit, 0)
+        statement = (
+            select(MessageRecord)
+            .where(MessageRecord.conversation_id == conversation_id)
+            .order_by(MessageRecord.sequence_number.desc(), MessageRecord.id.desc())
+            .limit(limit)
+        )
+        async with self._session_factory() as session:
+            records = list((await session.scalars(statement)).all())
+        return list(reversed(records))
+
+    async def update_conversation_state(
+        self, conversation_id: UUID, *, context_state: dict[str, object]
+    ) -> ConversationRecord | None:
+        async with self._session_factory() as session, session.begin():
+            record = await session.get(ConversationRecord, conversation_id)
+            if record is None:
+                return None
+            record.context_state = dict(context_state)
+            record.updated_at = func.now()
+            await session.flush()
+            await session.refresh(record)
+            return record
 
 
 class AnalyticsRequestRepository:
