@@ -118,6 +118,17 @@ class ConversationRepository:
             await session.refresh(record)
             return record
 
+    async def restore_conversation(self, conversation_id: UUID) -> ConversationRecord | None:
+        async with self._session_factory() as session, session.begin():
+            record = await session.get(ConversationRecord, conversation_id)
+            if record is None:
+                return None
+            record.archived_at = None
+            record.updated_at = func.now()
+            await session.flush()
+            await session.refresh(record)
+            return record
+
     async def delete_conversation(self, conversation_id: UUID) -> bool:
         async with self._session_factory() as session, session.begin():
             record = await session.get(ConversationRecord, conversation_id)
@@ -134,6 +145,7 @@ class ConversationRepository:
         role: str,
         content: str,
         message_metadata: dict[str, object] | None = None,
+        message_id: UUID | None = None,
     ) -> MessageRecord | None:
         """Append a message while holding the parent row lock for sequence safety."""
         async with self._session_factory() as session, session.begin():
@@ -150,6 +162,7 @@ class ConversationRepository:
                 )
             )
             record = MessageRecord(
+                id=message_id,
                 conversation_id=conversation_id,
                 sequence_number=(latest_sequence or 0) + 1,
                 role=role,
@@ -158,6 +171,22 @@ class ConversationRepository:
             )
             session.add(record)
             conversation.updated_at = func.now()
+            await session.flush()
+            await session.refresh(record)
+            return record
+
+    async def get_message(self, message_id: UUID) -> MessageRecord | None:
+        async with self._session_factory() as session:
+            return await session.get(MessageRecord, message_id)
+
+    async def update_message_metadata(
+        self, message_id: UUID, *, message_metadata: dict[str, object]
+    ) -> MessageRecord | None:
+        async with self._session_factory() as session, session.begin():
+            record = await session.get(MessageRecord, message_id)
+            if record is None:
+                return None
+            record.message_metadata = dict(message_metadata)
             await session.flush()
             await session.refresh(record)
             return record
@@ -469,9 +498,7 @@ class ConnectionProfileRepository:
             await session.commit()
             return conversation.id
 
-    async def get_schema_snapshot_record(
-        self, profile_id: UUID
-    ) -> SchemaSnapshotRecord | None:
+    async def get_schema_snapshot_record(self, profile_id: UUID) -> SchemaSnapshotRecord | None:
         async with self._session_factory() as session:
             record = await session.scalar(
                 select(SchemaSnapshotRecord)
