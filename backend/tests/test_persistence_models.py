@@ -20,6 +20,12 @@ def test_conversation_and_message_metadata() -> None:
     assert {foreign_key.target_fullname for foreign_key in message.foreign_keys} == {
         "conversations.id"
     }
+    assert {foreign_key.constraint.name for foreign_key in conversation.foreign_keys} == {
+        "fk_conversations_connection_profile_id"
+    }
+    assert {foreign_key.constraint.name for foreign_key in message.foreign_keys} == {
+        "fk_messages_conversation_id"
+    }
     assert next(iter(message.foreign_keys)).ondelete == "CASCADE"
     assert {constraint.name for constraint in message.constraints} >= {
         "ck_messages_role_allowed",

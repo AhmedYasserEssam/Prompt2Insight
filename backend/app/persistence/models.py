@@ -48,7 +48,8 @@ class ConversationRecord(Base):
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
     connection_profile_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), ForeignKey("connection_profiles.id")
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("connection_profiles.id", name="fk_conversations_connection_profile_id"),
     )
     title: Mapped[str] = mapped_column(String(255), default="New conversation")
     language: Mapped[str] = mapped_column(String(10), default="auto")
@@ -79,7 +80,8 @@ class MessageRecord(Base):
 
     id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4)
     conversation_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE")
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("conversations.id", name="fk_messages_conversation_id", ondelete="CASCADE"),
     )
     sequence_number: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(String(16))
