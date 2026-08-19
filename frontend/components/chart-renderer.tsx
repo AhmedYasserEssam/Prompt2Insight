@@ -57,6 +57,7 @@ export function ChartRenderer({
           <div className="chart-switcher" role="group" aria-label="Visualization type">
             {choices.map((choice) => (
               <button
+                aria-pressed={selected === choice}
                 className={selected === choice ? "active" : ""}
                 key={choice}
                 onClick={() => setSelected(choice)}

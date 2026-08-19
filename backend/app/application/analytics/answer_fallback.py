@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from itertools import pairwise
 from typing import Any, Literal
 
@@ -158,24 +158,20 @@ def _time_series_summary(table: ResultTable, language: str) -> str:
     highest_row, _ = max(indexed_rows, key=lambda item: item[1])
     lowest_row, _ = min(indexed_rows, key=lambda item: item[1])
 
-    first_period = _format_value(first_row[period_index])
-    last_period = _format_value(last_row[period_index])
-    highest_period = _format_value(highest_row[period_index])
-    lowest_period = _format_value(lowest_row[period_index])
-    highest_value = _format_value(highest_row[value_index])
-    lowest_value = _format_value(lowest_row[value_index])
+    highest_period = _format_period(highest_row[period_index], language)
+    lowest_period = _format_period(lowest_row[period_index], language)
+    highest_value = _format_number(highest_row[value_index])
+    lowest_value = _format_number(lowest_row[value_index])
     metric = _label(table.columns[value_index], language)
 
     if language == "ar":
         return (
-            f"تغطي النتائج الفترة من {first_period} إلى {last_period}. "
-            f"أعلى قيمة لـ {metric} هي {highest_value} في {highest_period}، "
-            f"وأدنى قيمة هي {lowest_value} في {lowest_period}."
+            f"بلغت {metric} ذروتها عند {highest_value} في {highest_period}، "
+            f"ووصلت إلى أدنى مستوى عند {lowest_value} في {lowest_period}."
         )
     return (
-        f"The results cover {first_period} through {last_period}. "
-        f"The highest {metric} is {highest_value} in {highest_period}, and the lowest "
-        f"is {lowest_value} in {lowest_period}."
+        f"{metric.capitalize()} peaked at {highest_value} in {highest_period} and reached "
+        f"its lowest point of {lowest_value} in {lowest_period}."
     )
 
 
@@ -250,6 +246,29 @@ def _format_value(value: Any) -> str:
     if isinstance(value, bool):
         return str(value).lower()
     return str(value)
+
+
+def _format_number(value: Any) -> str:
+    try:
+        number = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return _format_value(value)
+    return format(number, ",f").rstrip("0").rstrip(".")
+
+
+def _format_period(value: Any, language: str) -> str:
+    raw = _format_value(value)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(f"{raw}-01")
+        except ValueError:
+            return raw
+    if language == "ar":
+        months = ("يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر")
+        return f"{months[parsed.month - 1]} {parsed.year}"
+    return parsed.strftime("%B %Y")
 
 
 def _label(column: str, language: str) -> str:

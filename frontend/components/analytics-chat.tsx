@@ -38,10 +38,8 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const direction = useMemo(
-    () => (result?.language === "ar" ? "rtl" : "ltr"),
-    [result?.language],
-  );
+  const activeLanguage = result?.language ?? (responseLanguage === "ar" ? "ar" : "en");
+  const direction = useMemo(() => (activeLanguage === "ar" ? "rtl" : "ltr"), [activeLanguage]);
   const t = result?.language === "ar" ? labels.ar : labels.en;
   const completedResult =
     result?.status === "success" || result?.status === "empty_result";
@@ -77,7 +75,7 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
 
   return (
     <div className="stack">
-      <form className="card stack" onSubmit={submit}>
+      <form className="card stack" onSubmit={submit} dir={direction} lang={activeLanguage}>
         <div className="row">
           <label htmlFor="language">Response language</label>
           <select
@@ -93,7 +91,9 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
           </select>
         </div>
 
+        <label className="question-label" htmlFor="data-question">{responseLanguage === "ar" ? "اطرح سؤالًا عن البيانات" : "Ask a data question"}</label>
         <textarea
+          id="data-question"
           required
           maxLength={4000}
           value={question}
@@ -153,7 +153,7 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
               open={tableStartsExpanded(result.table.rows.length)}
             >
               <summary>{t.viewData(result.table.rows.length)}</summary>
-              <div className="table-wrap">
+              <div className="table-wrap" tabIndex={0} aria-label={t.viewData(result.table.rows.length)}>
                 <table>
                   <thead>
                     <tr>{result.table.columns.map((column) => <th key={column}>{column}</th>)}</tr>
@@ -177,7 +177,7 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
           {hasTechnicalDetails ? (
             <details className="result-disclosure technical-details">
               <summary>{t.technicalDetails}</summary>
-              <div className="stack disclosure-content">
+              <div className="stack disclosure-content" tabIndex={0}>
                 {technicalWarnings.length ? (
                   <ul>{technicalWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
                 ) : null}

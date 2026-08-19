@@ -33,6 +33,7 @@ const IDENTIFIER_COLUMN = /(?:^id$|_id$|^uuid$|_uuid$)/i;
 const TEMPORAL_COLUMN = /(?:^|_)(?:date|datetime|day|week|month|quarter|year|time|timestamp)(?:_|$)/i;
 const PERCENT_COLUMN = /(?:^|_)(?:percent|percentage|pct|ratio)(?:_|$)/i;
 const INTEGER = /^-?\d+$/;
+const DECIMAL = /^-?\d+(?:\.\d+)?$/;
 
 export function buildChartModel(
   chart: ChartSpecification,
@@ -196,8 +197,13 @@ export function formatTableValue(
       ? formatPercentage(value)
       : formatFullNumber(value);
   }
-  if (typeof value === "string" && INTEGER.test(value) && !isIdentifierColumn(column)) {
-    return new Intl.NumberFormat("en-US").format(Number(value));
+  if (typeof value === "string" && DECIMAL.test(value) && !isIdentifierColumn(column)) {
+    const numericValue = Number(value);
+    return isPercentageColumn(column)
+      ? formatPercentage(numericValue)
+      : INTEGER.test(value)
+        ? new Intl.NumberFormat("en-US").format(numericValue)
+        : formatFullNumber(numericValue);
   }
   return String(value);
 }
@@ -220,7 +226,7 @@ export function formatDate(
   const monthly = /month/i.test(column);
   if (monthly) {
     return new Intl.DateTimeFormat(locale, {
-      month: context === "tooltip" ? "long" : "short",
+      month: context === "axis" ? "short" : "long",
       year: "numeric",
       timeZone: "UTC",
     }).format(parsed);

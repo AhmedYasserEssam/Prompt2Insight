@@ -29,6 +29,14 @@ test("monthly dates use clean axis and tooltip labels", () => {
   );
 });
 
+test("table dates use the full readable month and formatted values", () => {
+  assert.equal(
+    formatDate("2018-11-01T00:00:00+00:00", "en", "table", "month"),
+    "November 2018",
+  );
+  assert.equal(formatFullNumber(117938.1550), "117,938.16");
+});
+
 test("time series points are copied and sorted chronologically", () => {
   const table: ResultTable = {
     columns: ["month", "total_sales"],
@@ -70,8 +78,9 @@ test("axis, tooltip, counts, and percentages use centralized precision", () => {
 test("table formatting preserves identifiers and formats analytical values", () => {
   assert.equal(formatTableValue(1000001, "order_id", "en"), "1000001");
   assert.equal(formatTableValue(728658.5757, "total_sales", "en"), "728,658.58");
+  assert.equal(formatTableValue("117938.1550", "total_sales", "en"), "117,938.16");
   assert.equal(formatTableValue(4922, "order_count", "en"), "4,922");
-  assert.equal(formatTableValue("2016-01-01T00:00:00", "month", "en"), "Jan 2016");
+  assert.equal(formatTableValue("2016-01-01T00:00:00", "month", "en"), "January 2016");
 });
 
 test("long-form results become separate sorted series without mutating rows", () => {

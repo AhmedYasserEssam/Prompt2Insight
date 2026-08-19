@@ -18,16 +18,16 @@ body {
 }
 
 button, textarea, select, input { font: inherit; }
-main { width: min(960px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0; }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
-.stack { display: grid; gap: 16px; }
-.response-stack { display: grid; gap: 24px; }
+main { width: min(960px, calc(100% - 32px)); max-width: 100%; margin: 0 auto; padding: 48px 0; }
+.card { min-width: 0; max-width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+.stack { display: grid; min-width: 0; max-width: 100%; gap: 16px; }
+.response-stack { display: grid; min-width: 0; max-width: 100%; gap: 24px; }
 .result-section { min-width: 0; }
 .section-label { color: var(--muted); font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; }
 .answer-copy { font-size: clamp(1.1rem, 2vw, 1.35rem); line-height: 1.55; }
 .visible-warnings { padding: 12px 14px; border-inline-start: 3px solid #b7791f; background: #fff8e6; border-radius: 8px; }
 .visible-warnings ul { margin: 0; }
-.result-disclosure { border-top: 1px solid var(--border); padding-top: 14px; }
+.result-disclosure { min-width: 0; max-width: 100%; overflow-x: auto; border-top: 1px solid var(--border); padding-top: 14px; }
 .result-disclosure summary { color: var(--accent); cursor: pointer; font-weight: 700; }
 .result-disclosure[open] summary { margin-bottom: 14px; }
 .technical-details summary { color: var(--muted); font-size: .9rem; font-weight: 600; }
@@ -35,6 +35,8 @@ main { width: min(960px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0; }
 .disclosure-content ul { margin: 0; }
 .row { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
 textarea { width: 100%; min-height: 128px; resize: vertical; border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+.question-label { color: var(--text); font-weight: 700; }
+[dir="rtl"] textarea, [dir="rtl"] input { text-align: right; }
 button { border: 0; border-radius: 10px; background: var(--accent); color: white; padding: 10px 18px; cursor: pointer; }
 button:disabled { opacity: .6; cursor: wait; }
 label { color: var(--muted); }
@@ -44,7 +46,7 @@ input { width: 100%; border: 1px solid var(--border); border-radius: 8px; paddin
 small { color: var(--muted); }
 pre, code { direction: ltr; text-align: left; }
 .error { color: var(--danger); }
-.table-wrap { overflow-x: auto; }
+.table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
 th, td { border-bottom: 1px solid var(--border); padding: 8px; text-align: start; }
 .numeric-cell { direction: ltr; text-align: end; font-variant-numeric: tabular-nums; }
@@ -54,7 +56,7 @@ th, td { border-bottom: 1px solid var(--border); padding: 8px; text-align: start
 .chart-switcher { display: flex; flex-wrap: wrap; gap: 4px; padding: 3px; border: 1px solid var(--border); border-radius: 9px; background: var(--background); }
 .chart-switcher button { padding: 5px 9px; border-radius: 6px; background: transparent; color: var(--muted); font-size: .78rem; }
 .chart-switcher button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgb(15 23 42 / 12%); }
-.chart-canvas { width: 100%; overflow-x: auto; direction: ltr; }
+.chart-canvas { min-width: 0; max-width: 100%; width: 100%; overflow-x: auto; direction: ltr; }
 .chart-canvas svg { display: block; width: 100%; min-width: 560px; height: auto; max-height: 460px; overflow: visible; }
 .chart-grid { stroke: #e5e7eb; stroke-width: 1; }
 .chart-axis-label { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -77,9 +79,35 @@ th, td { border-bottom: 1px solid var(--border); padding: 8px; text-align: start
 .chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
 .chart-legend b { margin-inline-start: auto; color: var(--text); font-variant-numeric: tabular-nums; }
 
+.workspace-header { align-items: center; }
+.connection-selector { min-width: 0; max-width: 100%; display: flex; align-items: center; gap: 8px; }
+.connection-selector select { min-width: 0; max-width: 100%; }
+.connection-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; }
+.connection-toolbar input { margin: 0; }
+.connection-list { display: grid; gap: 12px; }
+.connection-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
+.connection-card h4, .connection-card p { margin: 0; }
+.connection-card p { color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+.status-chip { display: inline-flex; align-items: center; width: fit-content; border-radius: 999px; padding: 3px 8px; background: #e7f6ec; color: #176b3a; font-size: .78rem; font-weight: 700; }
+.status-chip.stale { background: #fff0df; color: #9a5312; }
+.status-chip.pending { background: #eef1f6; color: var(--muted); }
+.connection-menu { position: relative; }
+.connection-menu summary { list-style: none; cursor: pointer; padding: 7px 10px; border-radius: 8px; background: #e9edf5; }
+.connection-menu summary::-webkit-details-marker { display: none; }
+.connection-menu-actions { position: absolute; z-index: 1; inset-inline-end: 0; top: calc(100% + 4px); display: grid; min-width: 180px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 8px 24px rgb(15 23 42 / 15%); }
+.connection-menu-actions button { width: 100%; text-align: start; background: transparent; color: var(--text); }
+.pagination { display: flex; align-items: center; justify-content: center; gap: 10px; }
+
 @media (max-width: 640px) {
   main { width: min(100% - 20px, 960px); padding: 20px 0; }
   .card { padding: 16px; }
+  .row { align-items: flex-start; flex-wrap: wrap; }
+  .workspace-header { align-items: flex-start; }
+  .connection-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .connection-toolbar select { grid-column: 1 / -1; }
+  .connection-card { grid-template-columns: 1fr auto; }
+  .connection-card .connection-actions { grid-column: 1 / -1; display: grid; }
+  .connection-card .connection-actions button { width: 100%; }
   .donut-layout { grid-template-columns: 1fr; }
   .chart-heading { align-items: flex-start; }
 }

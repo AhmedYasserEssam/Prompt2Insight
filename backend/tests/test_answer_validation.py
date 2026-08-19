@@ -158,8 +158,8 @@ def test_chart_validation_is_independent_and_strict() -> None:
                 rows=[["2024-01", 10], ["2024-02", 30], ["2024-03", 20]],
             ),
             "en",
-            "The results cover 2024-01 through 2024-03. The highest revenue is 30 in "
-            "2024-02, and the lowest is 10 in 2024-01.",
+            "Revenue peaked at 30 in February 2024 and reached its lowest point of 10 in "
+            "January 2024.",
         ),
         (
             ResultTable(
@@ -175,8 +175,8 @@ def test_chart_validation_is_independent_and_strict() -> None:
                 rows=[["2024-01", 10], ["2024-02", 30], ["2024-03", 20]],
             ),
             "ar",
-            "تغطي النتائج الفترة من 2024-01 إلى 2024-03. أعلى قيمة لـ إجمالي المبيعات هي "
-            "30 في 2024-02، وأدنى قيمة هي 10 في 2024-01.",
+            "بلغت إجمالي المبيعات ذروتها عند 30 في فبراير 2024، ووصلت إلى أدنى مستوى عند "
+            "10 في يناير 2024.",
         ),
         (
             ResultTable(columns=["average_order_total"], rows=[[428.73]]),
@@ -219,3 +219,18 @@ def test_deterministic_answer_does_not_mutate_result_table() -> None:
     deterministic_answer(table, "en")
 
     assert table == original
+
+
+def test_time_series_summary_uses_readable_dates_and_numbers() -> None:
+    table = ResultTable(
+        columns=["month", "sales"],
+        rows=[
+            ["2015-02-01T00:00:00+00:00", 4519.89],
+            ["2018-11-01T00:00:00+00:00", 117938.1550],
+        ],
+    )
+
+    assert deterministic_answer(table, "en") == (
+        "Sales peaked at 117,938.16 in November 2018 and reached its lowest point "
+        "of 4,519.89 in February 2015."
+    )
