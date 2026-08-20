@@ -32,6 +32,14 @@ test("sent messages stay on the physical right in both layout directions", () =>
   assert.match(css, /\[dir="rtl"\] \.message-user\s*\{[^}]*flex-direction:\s*row/);
 });
 
+test("the active database remains legible when its selector is disabled", () => {
+  const disabledSelector = css.match(/\.header-connection select:disabled\s*\{([^}]+)\}/)?.[1] ?? "";
+
+  assert.match(disabledSelector, /color:\s*var\(--text\)/);
+  assert.match(disabledSelector, /opacity:\s*1/);
+  assert.match(disabledSelector, /-webkit-text-fill-color:\s*var\(--text\)/);
+});
+
 test("conversation history entries reopen the full thread", () => {
   assert.match(component, /getConversation\(conversationId\)/);
   assert.match(component, /href=\{`\/chat\/\$\{item\.id\}`\}/);
