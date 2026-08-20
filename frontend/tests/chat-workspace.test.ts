@@ -58,3 +58,13 @@ test("assistant analytics answers are not rendered twice", () => {
     /item\.role !== "assistant" \|\| !item\.metadata\.analytics \? <div className="message-content">\{item\.content\}<\/div> : null/,
   );
 });
+
+test("suggested prompts populate the composer without submitting", () => {
+  assert.match(component, /t\.suggestions\.map/);
+  assert.match(component, /onClick=\{\(\) => saveDraft\(suggestion\)\}/);
+});
+
+test("sending is gated on a ready data connection", () => {
+  assert.match(component, /const canQuery = activeProfile\?\.state === "ready"/);
+  assert.match(component, /disabled=\{sending \|\| !draft\.trim\(\) \|\| !canQuery\}/);
+});
