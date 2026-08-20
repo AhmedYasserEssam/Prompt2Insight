@@ -236,7 +236,7 @@ frontend/      Next.js chatbot and connection-management interface
 catalogs/      Bilingual semantic catalog examples
 infra/         LiteLLM configuration and integration database contracts
 data/          Sample analytics data
-docs/images/   README and documentation images
+assets/        documentation images
 ```
 
 ## Contributing
