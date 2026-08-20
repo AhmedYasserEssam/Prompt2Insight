@@ -35,6 +35,35 @@ export type AnalyticsResponse = {
   retryable: boolean;
 };
 
+export type ConversationMessage = {
+  id: string;
+  conversation_id: string;
+  sequence_number: number;
+  role: "user" | "assistant" | "system";
+  content: string;
+  metadata: {status?: string; error_code?: string; request_id?: string; analytics?: AnalyticsResponse};
+  created_at: string;
+};
+
+export type ConversationSummary = {
+  id: string;
+  connection_id: string | null;
+  title: string;
+  language: ResponseLanguage;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+};
+
+export type Conversation = ConversationSummary & {messages: ConversationMessage[]};
+
+export type ConversationSubmission = {
+  user_message: ConversationMessage;
+  assistant_message: ConversationMessage | null;
+  analytics: AnalyticsResponse | null;
+  failure: {status: "failed"; code: string; message: string} | null;
+};
+
 export type ConnectionProfileInput = {
   name: string;
   dialect: "postgres" | "mysql";
@@ -109,6 +138,37 @@ async function responseError(response: Response): Promise<Error> {
     detail?: string;
   } | null;
   return new Error(body?.message ?? body?.detail ?? "The request could not be completed.");
+}
+
+async function conversationRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}/conversations${path}`, options);
+  if (!response.ok) throw await responseError(response);
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+export function listConversations(includeArchived = false): Promise<{items: ConversationSummary[]}> {
+  return conversationRequest(`?limit=100${includeArchived ? "&include_archived=true" : ""}`);
+}
+
+export function getConversation(conversationId: string): Promise<Conversation> {
+  return conversationRequest(`/${conversationId}`);
+}
+
+export function createConversation(input: {connectionId: string; language: ResponseLanguage}): Promise<Conversation> {
+  return conversationRequest("", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({connection_id: input.connectionId, language: input.language})});
+}
+
+export function updateConversation(conversationId: string, input: {title?: string; archived?: boolean; language?: ResponseLanguage}): Promise<Conversation> {
+  return conversationRequest(`/${conversationId}`, {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(input)});
+}
+
+export function deleteConversation(conversationId: string): Promise<void> {
+  return conversationRequest(`/${conversationId}`, {method: "DELETE"});
+}
+
+export function submitConversationMessage(conversationId: string, input: {content: string; clientMessageId: string}): Promise<ConversationSubmission> {
+  return conversationRequest(`/${conversationId}/messages`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({content: input.content, client_message_id: input.clientMessageId})});
 }
 
 async function connectionRequest<T>(path: string, options?: RequestInit): Promise<T> {
