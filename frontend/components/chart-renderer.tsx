@@ -18,7 +18,7 @@ import {
   type VisualizationLanguage,
 } from "@/lib/visualization";
 
-const PALETTE = ["#2563eb", "#0f766e", "#9333ea", "#ea580c", "#0891b2", "#be123c", "#4d7c0f", "#7c3aed"];
+const PALETTE = ["#111111", "#404040", "#737373", "#a3a3a3", "#262626", "#525252", "#8a8a8a", "#d4d4d4"];
 
 const switcherLabels = {
   en: {bar: "Bar", horizontal_bar: "Horizontal bar", line: "Line", area: "Area", scatter: "Scatter", donut: "Donut", table: "Table", tableHint: "The formatted result table is shown below.", switcher: "Visualization type"},

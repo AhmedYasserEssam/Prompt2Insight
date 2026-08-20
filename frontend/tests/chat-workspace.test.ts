@@ -11,6 +11,10 @@ const conversationPage = readFileSync(
   new URL("../app/chat/[conversationId]/page.tsx", import.meta.url),
   "utf8",
 );
+const chartRenderer = readFileSync(
+  new URL("../components/chart-renderer.tsx", import.meta.url),
+  "utf8",
+);
 
 test("chat fills the viewport with the composer below the scrolling thread", () => {
   const chatMain = css.match(/\.chat-main\s*\{([^}]+)\}/)?.[1] ?? "";
@@ -67,4 +71,12 @@ test("suggested prompts populate the composer without submitting", () => {
 test("sending is gated on a ready data connection", () => {
   assert.match(component, /const canQuery = activeProfile\?\.state === "ready"/);
   assert.match(component, /disabled=\{sending \|\| !draft\.trim\(\) \|\| !canQuery\}/);
+});
+
+test("the chatbot uses text-only branding and a monochrome theme", () => {
+  assert.match(component, /<span className="brand-copy">/);
+  assert.doesNotMatch(component, /className="brand-mark"/);
+  assert.match(css, /--accent:\s*#111111/);
+  assert.doesNotMatch(css, /#4f46e5|#6366f1|#7c3aed/);
+  assert.match(chartRenderer, /const PALETTE = \["#111111", "#404040"/);
 });

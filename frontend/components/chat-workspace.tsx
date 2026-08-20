@@ -155,7 +155,6 @@ export function ChatWorkspace({conversationId}: {conversationId?: string}) {
   return <div className={`chat-shell ${collapsed ? "sidebar-collapsed" : ""}`} dir={activeLanguage === "ar" ? "rtl" : "ltr"} lang={activeLanguage}>
     <aside ref={drawer} className={`chat-sidebar ${drawerOpen ? "drawer-open" : ""}`} aria-label="Conversation history" aria-modal={drawerOpen || undefined} role={drawerOpen ? "dialog" : undefined}>
       <div className="sidebar-brand">
-        <span className="brand-mark"><Icon name="spark" /></span>
         <span className="brand-copy"><strong>Prompt2Insight</strong><small>AI data analyst</small></span>
         <button className="sidebar-close" type="button" aria-label={t.closeSidebar} onClick={() => setDrawerOpen(false)}><Icon name="close" /></button>
       </div>
