@@ -1,6 +1,6 @@
 import json
 from hashlib import sha256
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -265,6 +265,7 @@ class ConversationRepository:
                 )
             )
             assistant = MessageRecord(
+                id=uuid4(),
                 conversation_id=conversation_id,
                 sequence_number=(latest_sequence or 0) + 1,
                 role="assistant",

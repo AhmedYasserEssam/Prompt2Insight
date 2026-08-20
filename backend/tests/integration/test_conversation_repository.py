@@ -9,8 +9,18 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.application.conversations.submit_question import ConversationQuestionService
+from app.core.config import Settings
+from app.domain.analytics.models import (
+    AnalyticsRequest,
+    AnalyticsResponse,
+    AnalyticsStatus,
+    QueryPlan,
+    ResultTable,
+)
+from app.domain.databases.models import SQLDialect
 from app.persistence.models import ConnectionProfileRecord, ConversationRecord, MessageRecord
-from app.persistence.repositories import ConversationRepository
+from app.persistence.repositories import ConnectionProfileRepository, ConversationRepository
 
 pytestmark = pytest.mark.skipif(
     os.getenv("P2I_RUN_PERSISTENCE_INTEGRATION") != "1",
@@ -189,3 +199,149 @@ async def test_concurrent_message_adds_use_unique_sequence_numbers(
     assert all(message is not None for message in created)
     messages = await repository.list_messages(conversation.id)
     assert [message.sequence_number for message in messages] == [1, 2]
+
+
+class _DeterministicAnalytics:
+    def __init__(self) -> None:
+        self.responses: dict[UUID, AnalyticsResponse] = {}
+        self.calls = 0
+
+    async def run(self, *, conversation_id: UUID, request: AnalyticsRequest) -> AnalyticsResponse:
+        self.calls += 1
+        if request.question == "fail":
+            response = AnalyticsResponse(
+                status=AnalyticsStatus.FAILED,
+                request_id=request.request_id,
+                language="en",
+            )
+        else:
+            filters = []
+            sql = "SELECT order_month, SUM(sales) AS total_sales FROM analytics.sales GROUP BY 1"
+            if "2017" in request.question:
+                filters = [{"dimension_id": "order_year", "operator": "eq", "value": "2017"}]
+                sql += " HAVING EXTRACT(YEAR FROM order_month) = 2017"
+            if "2018" in request.question:
+                filters = [{"dimension_id": "order_year", "operator": "in", "value": "2017,2018"}]
+                sql += " HAVING EXTRACT(YEAR FROM order_month) IN (2017, 2018)"
+            response = AnalyticsResponse(
+                status=AnalyticsStatus.SUCCESS,
+                request_id=request.request_id,
+                language="en",
+                answer="Monthly sales returned.",
+                table=ResultTable(columns=["order_month", "total_sales"], rows=[["2017-01", 10]]),
+                sql=sql,
+                query_plan=QueryPlan(
+                    status="ready",
+                    response_language="en",
+                    database_dialect=SQLDialect.POSTGRES,
+                    interpretation="monthly sales",
+                    metric_ids=["total_sales"],
+                    dimension_ids=["order_month"],
+                    filters=filters,  # type: ignore[arg-type]
+                    sql=sql,
+                ),
+            )
+        self.responses[request.request_id] = response
+        return response
+
+    async def get(self, request_id: UUID) -> AnalyticsResponse | None:
+        return self.responses.get(request_id)
+
+    async def title_for(self, *, question: str, language: str) -> str | None:
+        return "Monthly sales"
+
+
+async def test_question_lifecycle_is_durable_idempotent_and_preserves_valid_state(
+    repository: ConversationRepository,
+) -> None:
+    profile_id = await _profile(repository)
+    conversation = await repository.create_conversation(connection_id=profile_id)
+    analytics = _DeterministicAnalytics()
+    settings = Settings(conversation_summary_threshold_tokens=100_000)
+    service = ConversationQuestionService(
+        repository,
+        ConnectionProfileRepository(repository._session_factory),
+        analytics,  # type: ignore[arg-type]
+        settings,
+    )
+    first_id, second_id, third_id = uuid4(), uuid4(), uuid4()
+
+    first = await service.submit(
+        conversation_id=conversation.id,
+        client_message_id=first_id,
+        content="Show monthly sales.",
+    )
+    # A fresh service/session simulates application restart before the continuation.
+    restarted = ConversationQuestionService(
+        ConversationRepository(repository._session_factory),
+        ConnectionProfileRepository(repository._session_factory),
+        analytics,  # type: ignore[arg-type]
+        settings,
+    )
+    second = await restarted.submit(
+        conversation_id=conversation.id,
+        client_message_id=second_id,
+        content="Show only 2017.",
+    )
+    third = await restarted.submit(
+        conversation_id=conversation.id,
+        client_message_id=third_id,
+        content="Compare that with 2018.",
+    )
+
+    assert (
+        first.analytics is not None and second.analytics is not None and third.analytics is not None
+    )
+    for response in (second.analytics, third.analytics):
+        assert response.query_plan is not None
+        assert response.query_plan.metric_ids == ["total_sales"]
+        assert response.query_plan.dimension_ids == ["order_month"]
+    assert "2017" in (second.analytics.sql or "")
+    assert "2017, 2018" in (third.analytics.sql or "")
+
+    duplicated = await asyncio.gather(
+        restarted.submit(
+            conversation_id=conversation.id,
+            client_message_id=third_id,
+            content="Compare that with 2018.",
+        ),
+        restarted.submit(
+            conversation_id=conversation.id,
+            client_message_id=third_id,
+            content="Compare that with 2018.",
+        ),
+    )
+    assert all(item.assistant_message is not None for item in duplicated)
+    assert analytics.calls == 3
+
+    await repository.update_conversation(
+        conversation.id, title="Finance review", title_is_manual=True
+    )
+    manual_title_submission = await restarted.submit(
+        conversation_id=conversation.id,
+        client_message_id=uuid4(),
+        content="Show monthly sales again.",
+    )
+    assert manual_title_submission.assistant_message is not None
+    assert (await repository.get_conversation(conversation.id)).title == "Finance review"  # type: ignore[union-attr]
+
+    before_failure = (await repository.get_conversation(conversation.id)).context_state  # type: ignore[union-attr]
+    failed = await restarted.submit(
+        conversation_id=conversation.id, client_message_id=uuid4(), content="fail"
+    )
+    reloaded = await repository.get_conversation(conversation.id)
+    assert failed.failure_code == "analysis_failed"
+    assert reloaded is not None and reloaded.context_state == before_failure
+    assert reloaded.title == "Finance review"
+    messages = await repository.list_messages(conversation.id)
+    assert [message.role for message in messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]

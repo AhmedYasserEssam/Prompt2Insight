@@ -33,11 +33,12 @@ def estimate_tokens(text: str) -> int:
 
 def redact_sensitive_text(text: str) -> str:
     """Keep user-provided secrets out of durable memory and model context."""
-    return re.sub(
+    redacted = re.sub(
         r"(?i)\b(password|passwd|api[_ -]?key|token|secret|connection[_ -]?string)\s*[:=]\s*\S+",
         r"\1=[redacted]",
         text,
     )
+    return re.sub(r"(?i)\b(?:postgres(?:ql)?|mysql)://\S+", "[redacted-url]", redacted)
 
 
 def build_planner_context(
