@@ -4,6 +4,14 @@ Prompt2Insight is a bilingual (English and Arabic) business-intelligence assista
 
 It combines a FastAPI backend, a Next.js chat interface, PostgreSQL-backed conversation history, and LiteLLM model routing.
 
+> **Recommended:** Run the complete local environment with Docker Compose:
+>
+> ```bash
+> docker compose up --build
+> ```
+>
+> This starts the frontend, backend, LiteLLM proxy, and application database together. See [Quick start](#quick-start) for the required `.env` configuration.
+
 ## What it does
 
 - Connects to PostgreSQL and MySQL analytics databases and introspects their schemas.
