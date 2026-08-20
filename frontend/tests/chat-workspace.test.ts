@@ -51,3 +51,10 @@ test("retrying a failed message resubmits its content with a fresh id", () => {
     /retry\.current = \{content: item\.content, id: crypto\.randomUUID\(\)\}/,
   );
 });
+
+test("assistant analytics answers are not rendered twice", () => {
+  assert.match(
+    component,
+    /item\.role !== "assistant" \|\| !item\.metadata\.analytics \? <div className="message-content">\{item\.content\}<\/div> : null/,
+  );
+});

@@ -162,7 +162,7 @@ export function ChatWorkspace({conversationId}: {conversationId?: string}) {
 
 function MessageBubble({item, onRetry, retryLabel, failedLabel, language: conversationLanguage}: {item: ConversationMessage; onRetry: () => void; retryLabel: string; failedLabel: string; language: "en" | "ar"}) {
   const language = item.metadata.analytics?.language ?? conversationLanguage;
-  return <article className={`message message-${item.role}`} dir={language === "ar" ? "rtl" : "ltr"} lang={language}><div className="message-content">{item.content}</div>{item.role === "assistant" && item.metadata.analytics ? <AnalyticsResult result={item.metadata.analytics} onRetry={onRetry} /> : null}{item.metadata.status === "failed" ? <small className="error">{failedLabel} <button type="button" className="secondary" onClick={onRetry}>{retryLabel}</button></small> : null}</article>;
+  return <article className={`message message-${item.role}`} dir={language === "ar" ? "rtl" : "ltr"} lang={language}>{item.role !== "assistant" || !item.metadata.analytics ? <div className="message-content">{item.content}</div> : null}{item.role === "assistant" && item.metadata.analytics ? <AnalyticsResult result={item.metadata.analytics} onRetry={onRetry} /> : null}{item.metadata.status === "failed" ? <small className="error">{failedLabel} <button type="button" className="secondary" onClick={onRetry}>{retryLabel}</button></small> : null}</article>;
 }
 
 function mergeMessages(current: ConversationMessage[], added: ConversationMessage[]) { return [...current, ...added.filter((item) => !current.some((existing) => existing.id === item.id))].sort((left, right) => left.sequence_number - right.sequence_number); }
