@@ -41,7 +41,10 @@ QuestionServiceDependency = Annotated[
 
 
 def _metadata(record: MessageRecord) -> dict[str, object]:
-    allowed = {"status", "request_id", "error_code", "assistant_message_id"}
+    # Analytics is already part of the public message-submission response. Keeping
+    # that same payload on the assistant message lets a reopened conversation render
+    # its result without relying on a transient browser cache.
+    allowed = {"status", "request_id", "error_code", "assistant_message_id", "analytics"}
     return {key: value for key, value in record.message_metadata.items() if key in allowed}
 
 

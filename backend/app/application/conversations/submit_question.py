@@ -124,6 +124,7 @@ class ConversationQuestionService:
             conversation_id=conversation_id,
             assistant_content=response.answer or "Analysis completed.",
             request_id=client_message_id,
+            analytics=response,
             context_state=state,
             automatic_title=automatic_title,
         )

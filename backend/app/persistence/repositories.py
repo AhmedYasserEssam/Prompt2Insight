@@ -246,6 +246,7 @@ class ConversationRepository:
         conversation_id: UUID,
         assistant_content: str,
         request_id: UUID,
+        analytics: AnalyticsResponse,
         context_state: dict[str, object],
         automatic_title: str | None,
     ) -> tuple[MessageRecord, MessageRecord] | None:
@@ -270,7 +271,11 @@ class ConversationRepository:
                 sequence_number=(latest_sequence or 0) + 1,
                 role="assistant",
                 content=assistant_content,
-                message_metadata={"request_id": str(request_id), "status": "completed"},
+                message_metadata={
+                    "request_id": str(request_id),
+                    "status": "completed",
+                    "analytics": analytics.model_dump(mode="json", by_alias=True),
+                },
             )
             session.add(assistant)
             user.message_metadata = {
