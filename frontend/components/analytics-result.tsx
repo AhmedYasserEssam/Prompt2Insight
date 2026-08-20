@@ -8,8 +8,8 @@ import type {AnalyticsResponse} from "@/lib/api";
 import {formatTableValue} from "@/lib/visualization";
 
 const copy = {
-  en: {empty: "No matching rows were returned.", chartEmpty: "No numeric chart values were returned.", warnings: "Warnings", viewData: (count: number) => `View data (${count} rows)`, resultData: "Result data", technical: "Technical details", copy: "Copy SQL", copied: "Copied", retry: "Retry"},
-  ar: {empty: "لم يتم العثور على صفوف مطابقة.", chartEmpty: "لم يتم إرجاع قيم رقمية للمخطط.", warnings: "تنبيهات", viewData: (count: number) => `عرض البيانات (${count} صفوف)`, resultData: "بيانات النتيجة", technical: "التفاصيل التقنية", copy: "نسخ SQL", copied: "تم النسخ", retry: "إعادة المحاولة"},
+  en: {answer: "Answer", insights: "Key insights", empty: "No matching rows were returned.", chartEmpty: "No numeric chart values were returned.", warnings: "Warnings", viewData: (count: number) => `View data (${count} rows)`, resultData: "Result data", technical: "Technical details", copy: "Copy SQL", copied: "Copied", retry: "Retry"},
+  ar: {answer: "الإجابة", insights: "أهم النتائج", empty: "لم يتم العثور على صفوف مطابقة.", chartEmpty: "لم يتم إرجاع قيم رقمية للمخطط.", warnings: "تنبيهات", viewData: (count: number) => `عرض البيانات (${count} صفوف)`, resultData: "بيانات النتيجة", technical: "التفاصيل التقنية", copy: "نسخ SQL", copied: "تم النسخ", retry: "إعادة المحاولة"},
 };
 
 export function AnalyticsResult({result, onRetry}: {result: AnalyticsResponse; onRetry?: () => void}) {
@@ -26,9 +26,9 @@ export function AnalyticsResult({result, onRetry}: {result: AnalyticsResponse; o
   };
 
   return <section className="analytics-result" dir={result.language === "ar" ? "rtl" : "ltr"} lang={result.language}>
-    {!completed ? <p className="result-status">{result.status.replaceAll("_", " ")}</p> : null}
+    <div className="analytics-result-header"><span>{t.answer}</span>{!completed ? <span className="result-status">{result.status.replaceAll("_", " ")}</span> : null}</div>
     {result.answer ? <div className="answer-copy">{result.answer}</div> : result.status === "empty_result" ? <p>{t.empty}</p> : null}
-    {result.insights?.length ? <ul>{result.insights.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+    {result.insights?.length ? <div className="insight-block"><strong>{t.insights}</strong><ul>{result.insights.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
     {visibleWarnings.length ? <div className="visible-warnings"><strong>{t.warnings}</strong><ul>{visibleWarnings.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
     {result.chart && result.table ? <ChartRenderer chart={result.chart} table={result.table} language={result.language} empty={t.chartEmpty} /> : null}
     {result.table ? <details className="result-disclosure" open={tableStartsExpanded(result.table.rows.length)}><summary>{t.viewData(result.table.rows.length)}</summary><div className="table-wrap" tabIndex={0} aria-label={t.resultData}><table><thead><tr>{result.table.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{result.table.rows.map((row, index) => <tr key={index}>{row.map((value, cell) => <td className={typeof value === "number" ? "numeric-cell" : ""} key={cell}>{formatTableValue(value, result.table?.columns[cell] ?? "", result.language)}</td>)}</tr>)}</tbody></table></div></details> : null}
