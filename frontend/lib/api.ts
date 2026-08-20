@@ -108,30 +108,6 @@ export type CatalogValidationResult = {valid: boolean; errors: string[]};
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
 
-export async function askAnalyticsQuestion(input: {
-  conversationId: string;
-  requestId: string;
-  question: string;
-  responseLanguage: ResponseLanguage;
-}): Promise<AnalyticsResponse> {
-  const response = await fetch(
-    `${API_BASE_URL}/conversations/${input.conversationId}/requests`,
-    {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        request_id: input.requestId,
-        question: input.question,
-        response_language: input.responseLanguage,
-      }),
-    },
-  );
-
-  if (!response.ok) throw await responseError(response);
-
-  return (await response.json()) as AnalyticsResponse;
-}
-
 async function responseError(response: Response): Promise<Error> {
   const body = (await response.json().catch(() => null)) as {
     message?: string;
@@ -187,10 +163,6 @@ export function testConnection(input: ConnectionProfileInput): Promise<Connectio
 
 export function setupConnection(input: ConnectionProfileInput): Promise<SetupProgress> {
   return connectionRequest("/setup", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(input)});
-}
-
-export function selectConnection(profileId: string): Promise<SetupProgress> {
-  return connectionRequest(`/${profileId}/select`, {method: "POST"});
 }
 
 export function refreshConnectionSchema(profileId: string): Promise<SchemaRefreshResult> {
