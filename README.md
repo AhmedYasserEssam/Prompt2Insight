@@ -6,7 +6,7 @@ Prompt2Insight converts English and Arabic questions into validated, read-only S
 
 It combines a [FastAPI](https://fastapi.tiangolo.com/) backend, a [Next.js](https://nextjs.org/) chatbot interface, PostgreSQL-backed conversation memory, and [LiteLLM](https://docs.litellm.ai/) model routing.
 
-![Prompt2Insight chatbot showing a sales trend analysis](docs/images/prompt2insight-chat.png)
+![Prompt2Insight chatbot showing a sales trend analysis](assets/chatbot.png)
 
 ## Features
 
