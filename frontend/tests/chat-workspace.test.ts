@@ -76,6 +76,7 @@ test("sending is gated on a ready data connection", () => {
 test("the chatbot uses text-only branding and a monochrome theme", () => {
   assert.match(component, /<span className="brand-copy">/);
   assert.doesNotMatch(component, /className="brand-mark"/);
+  assert.doesNotMatch(component, /className="empty-mark"/);
   assert.match(css, /--accent:\s*#111111/);
   assert.doesNotMatch(css, /#4f46e5|#6366f1|#7c3aed/);
   assert.match(chartRenderer, /const PALETTE = \["#111111", "#404040"/);

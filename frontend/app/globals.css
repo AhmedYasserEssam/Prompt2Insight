@@ -115,7 +115,6 @@ th, td { border-bottom: 1px solid var(--border); padding: 8px; text-align: start
 .chat-sidebar { position: relative; z-index: 3; min-width: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto auto; gap: 14px; height: 100vh; height: 100dvh; padding: 18px 14px 14px; color: #e5e5e5; background: var(--sidebar); overflow: hidden; }
 .chat-sidebar svg { width: 20px; height: 20px; flex: 0 0 auto; }
 .sidebar-brand { min-width: 0; display: flex; align-items: center; gap: 10px; padding: 0 4px 6px; }
-.empty-mark { display: grid; place-items: center; color: var(--accent-contrast); background: var(--accent); box-shadow: 0 8px 24px rgb(0 0 0 / 16%); }
 .brand-copy { min-width: 0; display: grid; line-height: 1.15; }
 .brand-copy strong { color: white; font-size: .94rem; letter-spacing: -.01em; }
 .brand-copy small { margin-top: 4px; color: var(--sidebar-muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .09em; }
@@ -190,7 +189,6 @@ th, td { border-bottom: 1px solid var(--border); padding: 8px; text-align: start
 .technical-details > ul, .technical-details > code, .technical-details > .sql-row { margin: 14px; }
 .sql-row { min-width: 0; display: flex; align-items: start; gap: 10px; }.sql-row pre { flex: 1; min-width: 0; max-width: 100%; margin: 0; overflow: auto; padding: 12px; border-radius: 8px; background: #0a0a0a; color: #fafafa; font-size: .76rem; }
 .chat-empty { align-self: center; justify-self: center; width: min(100%, 680px); padding: 40px 0; text-align: center; }
-.empty-mark { width: 58px; height: 58px; margin: 0 auto 20px; border-radius: 18px; }.empty-mark svg { width: 29px; height: 29px; }
 .chat-empty h1 { margin: 0; font-size: clamp(1.65rem, 4vw, 2.2rem); letter-spacing: -.035em; }.chat-empty > p { max-width: 520px; margin: 12px auto 26px; color: var(--muted); line-height: 1.65; }
 .prompt-suggestions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; text-align: start; }
 .prompt-suggestions button { min-height: 84px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 13px; color: #262626; background: var(--surface); box-shadow: var(--shadow-sm); font-size: .8rem; line-height: 1.4; text-align: start; }
