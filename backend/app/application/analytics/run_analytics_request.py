@@ -343,13 +343,17 @@ class AnalyticsRequestService:
             )
             return _ExecutionOutcome(execution, plan_result, [])
         except Prompt2InsightError as exc:
-            if exc.code is not ErrorCode.QUERY_EXECUTION_FAILED:
+            if exc.code not in {
+                ErrorCode.QUERY_EXECUTION_FAILED,
+                ErrorCode.INVALID_QUERY_PARAMETER,
+                ErrorCode.UNAUTHORIZED_COLUMN,
+            }:
                 raise
 
             assert self._planner is not None
             assert self._planner_model_group is not None
             logger.warning(
-                "Recoverable SQL execution failure request_id=%s error_code=%s detail=%s",
+                "Recoverable query failure request_id=%s error_code=%s detail=%s",
                 request.request_id,
                 exc.code.value,
                 exc.safe_detail or exc.message,

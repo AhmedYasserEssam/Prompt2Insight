@@ -112,3 +112,40 @@ npm run dev
 ```
 
 Follow `IMPLEMENTATION_CHECKLIST.md` in order.
+
+## Conversation persistence and memory
+
+The chat UI uses `/chat/new` to start a thread and `/chat/{conversationId}` to reopen one.
+`POST /api/v1/conversations` binds each conversation to one ready connection profile and stores its
+language. `GET /api/v1/conversations` lists active threads, `GET /{id}` returns its ordered
+messages and saved analytics payloads, `PATCH /{id}` renames, changes language, archives, or
+restores it, and `DELETE /{id}` removes it. `POST /{id}/messages` persists a user message and its
+assistant result; client message IDs make retries idempotent. The existing
+`POST /{id}/requests` endpoint remains available for analytics requests.
+
+```text
+connection_profiles 1 ──< conversations 1 ──< messages
+                         │                    (conversation_id, sequence_number unique)
+                         └──< analytical_requests ──< query_executions
+```
+
+`conversations` has a UUID primary key, nullable connection-profile foreign key, language, title,
+summary, JSONB structured BI state, archive timestamp, and an `updated_at` index. `messages` has a
+UUID primary key, cascading conversation foreign key, ordered sequence number, constrained role
+(`user`, `assistant`, or `system`), content, JSONB metadata, and an index on
+`(conversation_id, sequence_number)`. The unique sequence constraint keeps message ordering stable
+across reloads and restarts.
+
+For every new question the backend builds planner context from the bound connection's catalog and
+schema, stored summary, structured BI state (last question/SQL, metrics, dimensions, filters, and
+bounded result sample), and recent persisted messages. Sensitive values are redacted; old history
+is compacted into the summary once the configured threshold is crossed, retaining the configured
+recent-message window. `CONVERSATION_CONTEXT_TOKEN_BUDGET` and
+`CONVERSATION_OUTPUT_TOKEN_RESERVE` bound the prompt before planner execution.
+
+For a local persistence check, start the stack, create and submit a conversation, restart only the
+`backend` and `frontend` services, then reopen `/chat/{conversationId}`. The app database volume is
+not removed by a normal restart. Check migrations with
+`docker compose exec -T backend sh -lc 'cd /app && alembic current && alembic upgrade head'`;
+run backend tests with `cd backend && python -m pytest`, and frontend checks with
+`cd frontend && npm test && npx tsc --noEmit && npm run build`.

@@ -56,6 +56,15 @@ def test_planner_prompt_normalizes_categorical_text_filters_only() -> None:
     assert "exact equality (column = :parameter)" in prompt
 
 
+def test_planner_prompt_resolves_follow_up_references_from_conversation_context() -> None:
+    prompt = " ".join(_planner_system_prompt(SQLDialect.POSTGRES).split())
+
+    assert "continuation of the supplied conversation" in prompt
+    assert "Resolve references" in prompt
+    assert "that, those, it, this, same, previous" in prompt
+    assert "current user question" in prompt
+
+
 def test_sql_repair_prompt_preserves_strict_safety_and_parameter_contract() -> None:
     prompt = " ".join(_sql_repair_system_prompt(SQLDialect.POSTGRES).split())
 

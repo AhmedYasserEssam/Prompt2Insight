@@ -17,6 +17,7 @@ from app.domain.analytics.models import (
     AnswerOutput,
     ChartSpecification,
     ModelExecutionMetadata,
+    QueryParameter,
     QueryPlan,
 )
 from app.domain.databases.connector import SQLDatabaseConnector
@@ -253,6 +254,62 @@ async def test_recoverable_execution_failure_gets_one_fully_revalidated_repair()
     assert response.model_metadata is not None
     assert response.model_metadata.generation_stage == "sql_repair"
     assert any("fully revalidated" in warning for warning in response.warnings)
+
+
+async def test_invalid_multi_value_parameter_gets_one_fully_revalidated_repair() -> None:
+    schema = snapshot()
+    connector = Connector(schema, [query_result()])
+    original = plan(
+        "SELECT analytics.sales.sales FROM analytics.sales WHERE analytics.sales.city IN (:years)"
+    ).model_copy(
+        update={"parameters": [QueryParameter(name="years", type="integer", value="2017,2018")]}
+    )
+    repaired = plan(
+        "SELECT analytics.sales.sales FROM analytics.sales "
+        "WHERE analytics.sales.city IN (:city_one, :city_two)"
+    ).model_copy(
+        update={
+            "parameters": [
+                QueryParameter(name="city_one", type="string", value="2017"),
+                QueryParameter(name="city_two", type="string", value="2018"),
+            ]
+        }
+    )
+    planner = Planner(original, repaired)
+
+    response = await run(service(connector, planner, None), "Compare that with 2018.")
+
+    assert response.status is AnalyticsStatus.SUCCESS
+    assert len(planner.repair_calls) == 1
+    assert len(connector.explained) == len(connector.executed) == 1
+    assert response.query_plan == repaired
+
+
+async def test_invalid_derived_alias_gets_one_fully_revalidated_repair() -> None:
+    schema = snapshot()
+    connector = Connector(schema, [query_result()])
+    original = plan(
+        "SELECT analytics.sales.city, SUM(analytics.sales.sales) AS total_sales, "
+        "ROW_NUMBER() OVER (ORDER BY total_sales DESC) AS sales_rank "
+        "FROM analytics.sales GROUP BY analytics.sales.city"
+    )
+    repaired = plan(
+        "SELECT analytics.sales.city, SUM(analytics.sales.sales) AS total_sales "
+        "FROM analytics.sales GROUP BY analytics.sales.city "
+        "ORDER BY total_sales DESC LIMIT 2"
+    )
+    planner = Planner(original, repaired)
+
+    response = await run(
+        service(connector, planner, None),
+        "Compare it with the second most sold product.",
+    )
+
+    assert response.status is AnalyticsStatus.SUCCESS
+    assert len(planner.repair_calls) == 1
+    assert "total_sales" in str(planner.repair_calls[0]["database_error"])
+    assert len(connector.explained) == len(connector.executed) == 1
+    assert response.query_plan == repaired
 
 
 async def test_repaired_unsafe_sql_is_rejected_before_second_explain() -> None:

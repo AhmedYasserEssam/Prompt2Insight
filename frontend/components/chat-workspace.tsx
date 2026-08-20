@@ -95,21 +95,31 @@ export function ChatWorkspace({conversationId}: {conversationId?: string}) {
     const clientMessageId = retry.current?.id ?? crypto.randomUUID();
     retry.current = {content, id: clientMessageId};
     try {
-      let id = conversationId;
+      let id = conversation?.id ?? conversationId;
+      let createdConversation: Conversation | null = null;
       if (!id) {
         if (!connectionId) throw new Error("Choose a ready connection before starting a chat.");
         const created = await createConversation({connectionId, language});
+        createdConversation = created;
         id = created.id;
+        setConversation(created);
         drafts.current.set(id, content); drafts.current.delete("new");
-        router.replace(`/chat/${id}`);
       }
       const result = await submitConversationMessage(id, {content, clientMessageId});
       const messages = [result.user_message, ...(result.assistant_message ? [result.assistant_message] : [])];
-      setConversation((current) => current?.id === id ? {...current, messages: mergeMessages(current.messages, messages)} : current);
-      saveDraft(""); retry.current = null;
+      setConversation((current) => {
+        const active = current?.id === id ? current : createdConversation;
+        return active ? {...active, messages: mergeMessages(active.messages, messages)} : current;
+      });
+      drafts.current.delete("new"); drafts.current.delete(id); setDraft(""); retry.current = null;
       await refreshHistory();
+      if (createdConversation) router.replace(`/chat/${id}`);
     } catch (caught) { setError(message(caught)); }
     finally { inFlight.current = false; setSending(false); }
+  }
+  function retryMessage(item: ConversationMessage) {
+    retry.current = {content: item.content, id: crypto.randomUUID()};
+    void send();
   }
   async function rename(item: ConversationSummary) {
     const title = window.prompt("Rename conversation", item.title)?.trim();
@@ -144,7 +154,7 @@ export function ChatWorkspace({conversationId}: {conversationId?: string}) {
     </aside>
     {drawerOpen ? <button className="drawer-backdrop" aria-label={t.closeSidebar} onClick={() => setDrawerOpen(false)} /> : null}
     <main className="chat-main"><header className="chat-header"><button ref={drawerTrigger} className="secondary mobile-menu" type="button" aria-label={t.openSidebar} aria-expanded={drawerOpen} onClick={() => setDrawerOpen(true)}>☰</button><div><strong>{conversation?.title ?? t.newChat}</strong><small>{activeProfile ? `${activeProfile.name} · ${activeProfile.state}` : t.noConnection}</small></div><select aria-label="Active connection" value={connectionId} onChange={(event) => { setConnectionId(event.target.value); window.localStorage.setItem(CONNECTION_KEY, event.target.value); }} disabled={Boolean(conversation)}>{profiles.filter((item) => item.state === "ready").map((item) => <option key={item.id} value={item.id}>{item.name} · {item.state}</option>)}</select></header>
-      <section className="message-thread" aria-live="polite" aria-busy={loading || sending} onScroll={(event) => { const element = event.currentTarget; nearBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; }}>{loading ? <p>{t.loading}</p> : null}{error && !conversation ? <div className="chat-error"><p>{t.unavailable}: {error}</p><Link href="/chat/new">{t.startNew}</Link></div> : null}{!loading && !error && !conversation ? <div className="chat-empty"><h1>{t.emptyTitle}</h1><p>{t.emptyText}</p></div> : null}{conversation?.messages.map((item) => <MessageBubble key={item.id} item={item} onRetry={() => void send()} retryLabel={t.retry} failedLabel={t.failed} language={activeLanguage} />)}{error && conversation ? <div className="chat-error" role="alert">{error}<button type="button" className="secondary" onClick={() => void send()}>{t.retry}</button></div> : null}<div ref={threadEnd} /></section>
+      <section className="message-thread" aria-live="polite" aria-busy={loading || sending} onScroll={(event) => { const element = event.currentTarget; nearBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; }}>{loading ? <p>{t.loading}</p> : null}{error && !conversation ? <div className="chat-error"><p>{t.unavailable}: {error}</p><Link href="/chat/new">{t.startNew}</Link></div> : null}{!loading && !error && !conversation ? <div className="chat-empty"><h1>{t.emptyTitle}</h1><p>{t.emptyText}</p></div> : null}{conversation?.messages.map((item) => <MessageBubble key={item.id} item={item} onRetry={() => retryMessage(item)} retryLabel={t.retry} failedLabel={t.failed} language={activeLanguage} />)}{error && conversation ? <div className="chat-error" role="alert">{error}<button type="button" className="secondary" onClick={() => void send()}>{t.retry}</button></div> : null}<div ref={threadEnd} /></section>
       <form className="chat-composer" onSubmit={send}><textarea aria-label={t.message} aria-describedby={error ? "composer-error" : undefined} placeholder={t.placeholder} value={draft} disabled={sending} onChange={(event) => { saveDraft(event.target.value); resize(event.currentTarget); }} onKeyDown={onKeyDown} /><button disabled={sending || !draft.trim()}>{sending ? t.working : t.send}</button>{error ? <span id="composer-error" className="sr-only">{error}</span> : null}</form>
     </main>
   </div>;

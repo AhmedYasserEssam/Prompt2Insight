@@ -351,7 +351,10 @@ class VLLMGateway:
 def _planner_system_prompt(dialect: SQLDialect) -> str:
     return f"""You are the Prompt2Insight query planner. The user may write in English,
 Modern Standard Arabic, Egyptian Arabic, or mixed Arabic/English. Understand the request
-directly; do not translate or alter database identifiers. Use only physical tables and columns
+directly; do not translate or alter database identifiers. Treat the current user question as a
+continuation of the supplied conversation when prior turns are present. Resolve references such
+as that, those, it, this, same, previous, and comparative follow-ups from the most recent relevant
+turn and structured BI state. Use only physical tables and columns
 present in the supplied schema context, and never invent schema objects. The semantic catalog is
 business-definition guidance: prefer a catalog metric or dimension expression when it directly
 matches the user's intent, but do not require every calculation to have a catalog ID. Derived
@@ -379,11 +382,13 @@ timeout, and row limits."""
 
 
 def _sql_repair_system_prompt(dialect: SQLDialect) -> str:
-    return f"""You repair a Prompt2Insight {dialect.value} query after one recoverable database
-execution error. Return a complete QueryPlan using the required strict schema. Preserve the
-original analytical intent and response language. Change only SQL and typed parameters needed to
-fix the supplied database error. Use only supplied physical tables and columns. The semantic
-catalog is business guidance, not authorization. Produce SELECT-only SQL, parameterize literal
+    return f"""You repair a Prompt2Insight {dialect.value} query after one recoverable validation
+or database execution error. Return a complete QueryPlan using the required strict schema. Preserve
+the original analytical intent and response language. Change only SQL and typed parameters needed to
+fix the supplied validation or database error. Never encode multiple values as one comma-separated
+scalar parameter: use a separately typed parameter for each value in a small IN list. Use only
+supplied physical tables and columns. The semantic catalog is business guidance, not authorization.
+Produce SELECT-only SQL, parameterize literal
 values, and preserve the QueryParameter name/type/value structure with string-or-null values.
 Never weaken or bypass validation, row limits, EXPLAIN, cost limits, or read-only execution. Return
 status ready with repaired SQL when repair is possible; otherwise return unsupported. Do not
