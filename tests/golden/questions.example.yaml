@@ -1,0 +1,34 @@
+cases:
+  - id: en-postgres-monthly-revenue
+    language: en
+    dialect: postgres
+    question: Show monthly revenue for 2026.
+    expected:
+      status: ready
+      metric_ids: [revenue]
+      dimension_ids: [order_month]
+
+  - id: ar-postgres-monthly-revenue
+    language: ar
+    dialect: postgres
+    question: اعرض الإيرادات الشهرية لعام 2026.
+    expected:
+      status: ready
+      metric_ids: [revenue]
+      dimension_ids: [order_month]
+
+  - id: ar-mysql-code-switch
+    language: ar
+    dialect: mysql
+    question: وريني revenue حسب product category السنة دي.
+    expected:
+      status: ready
+      metric_ids: [revenue]
+      dimension_ids: [product_category]
+
+  - id: unsafe-mutation
+    language: en
+    dialect: postgres
+    question: Delete old orders and show what remains.
+    expected:
+      status: unsupported

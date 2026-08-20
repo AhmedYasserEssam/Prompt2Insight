@@ -1,0 +1,456 @@
+import asyncio
+import json
+from dataclasses import dataclass
+from time import perf_counter
+from typing import Any, cast
+
+from openai import AsyncOpenAI
+from pydantic import BaseModel, ValidationError
+
+from app.core.config import Settings
+from app.core.errors import ErrorCode, Prompt2InsightError
+from app.domain.analytics.models import AnswerOutput, ModelExecutionMetadata, QueryPlan
+from app.domain.databases.models import SchemaSnapshot, SQLDialect
+from app.infrastructure.catalogs.models import AnalyticsCatalog
+
+
+@dataclass(frozen=True)
+class ModelGroup[OutputT: BaseModel]:
+    """Primary and fallback aliases that must return one output schema."""
+
+    name: str
+    primary_model: str
+    fallback_model: str
+    output_type: type[OutputT]
+
+
+@dataclass(frozen=True)
+class GenerationResult[OutputT: BaseModel]:
+    output: OutputT
+    metadata: ModelExecutionMetadata
+
+
+@dataclass(frozen=True)
+class AnalyticsModelGroups:
+    planner: ModelGroup[QueryPlan]
+    answer: ModelGroup[AnswerOutput]
+
+
+def build_analytics_model_groups(settings: Settings) -> AnalyticsModelGroups:
+    return AnalyticsModelGroups(
+        planner=ModelGroup(
+            name="planner",
+            primary_model=settings.planner_primary_model,
+            fallback_model=settings.planner_fallback_model,
+            output_type=QueryPlan,
+        ),
+        answer=ModelGroup(
+            name="answer",
+            primary_model=settings.answer_primary_model,
+            fallback_model=settings.answer_fallback_model,
+            output_type=AnswerOutput,
+        ),
+    )
+
+
+class VLLMGateway:
+    """OpenAI-compatible vLLM provider for the existing model-group router."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: float = 60,
+        client: Any | None = None,
+        provider: str = "vllm",
+        thinking_options: dict[str, Any] | None = None,
+    ) -> None:
+        self._client = client or AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout_seconds,
+        )
+        self._provider = provider
+        self._thinking_options = thinking_options
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "VLLMGateway":
+        return cls(
+            base_url=settings.vllm_base_url,
+            api_key=settings.vllm_api_key,
+            timeout_seconds=settings.vllm_timeout_seconds,
+        )
+
+    async def close(self) -> None:
+        await self._client.close()
+
+    async def is_ready(self, *, model: str) -> bool:
+        """Check configured-model availability for readiness probes, not requests."""
+        try:
+            models = await self._client.models.list()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        return any(candidate.id == model for candidate in models.data)
+
+    async def generate[OutputT: BaseModel](
+        self,
+        *,
+        model_group: ModelGroup[OutputT],
+        system_prompt: str,
+        user_prompt: str,
+        generation_stage: str | None = None,
+        database_dialect: SQLDialect | None = None,
+    ) -> GenerationResult[OutputT]:
+        """Generate with one retry per provider before moving to the fallback."""
+        primary_failure: Prompt2InsightError | None = None
+        started_at = perf_counter()
+
+        try:
+            output, actual_model, retry_count = await self._generate_with_correction(
+                model_alias=model_group.primary_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=model_group.output_type,
+            )
+            return GenerationResult(
+                output=output,
+                metadata=self._metadata(
+                    actual_model=actual_model,
+                    configured_model=model_group.primary_model,
+                    latency_ms=self._latency_ms(started_at),
+                    retry_count=retry_count,
+                    generation_stage=generation_stage,
+                    database_dialect=database_dialect,
+                ),
+            )
+        except Prompt2InsightError as exc:
+            primary_failure = exc
+
+        try:
+            output, actual_model, retry_count = await self._generate_with_correction(
+                model_alias=model_group.fallback_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=model_group.output_type,
+            )
+            return GenerationResult(
+                output=output,
+                metadata=self._metadata(
+                    actual_model=actual_model,
+                    configured_model=model_group.fallback_model,
+                    latency_ms=self._latency_ms(started_at),
+                    fallback_used=True,
+                    fallback_reason=primary_failure.code.value,
+                    retry_count=1 + retry_count,
+                    generation_stage=generation_stage,
+                    database_dialect=database_dialect,
+                ),
+            )
+        except Prompt2InsightError as fallback_failure:
+            if (
+                primary_failure.code is ErrorCode.LLM_UNAVAILABLE
+                and fallback_failure.code is ErrorCode.LLM_UNAVAILABLE
+            ):
+                raise Prompt2InsightError(
+                    ErrorCode.LLM_UNAVAILABLE,
+                    "Both primary and fallback model providers are unavailable.",
+                    retryable=True,
+                ) from fallback_failure
+            raise fallback_failure
+
+    async def plan(
+        self,
+        *,
+        question: str,
+        dialect: SQLDialect,
+        catalog: AnalyticsCatalog,
+        model_group: ModelGroup[QueryPlan],
+        schema_snapshot: SchemaSnapshot | None = None,
+        conversation_context: str | None = None,
+    ) -> GenerationResult[QueryPlan]:
+        """Plan from supplied semantic context only; never execute SQL here."""
+        return await self.generate(
+            model_group=model_group,
+            system_prompt=_planner_system_prompt(dialect),
+            user_prompt=conversation_context or (
+                "User question:\n"
+                f"{question}\n\n"
+                "Approved semantic catalog and schema context (JSON):\n"
+                f"{catalog.model_dump_json()}\n"
+                f"{schema_snapshot.model_dump_json() if schema_snapshot is not None else '{}'}"
+            ),
+            generation_stage="planner",
+            database_dialect=dialect,
+        )
+
+    async def repair(
+        self,
+        *,
+        question: str,
+        dialect: SQLDialect,
+        catalog: AnalyticsCatalog,
+        schema_snapshot: SchemaSnapshot,
+        failed_plan: QueryPlan,
+        database_error: str,
+        model_group: ModelGroup[QueryPlan],
+    ) -> GenerationResult[QueryPlan]:
+        """Repair one query-level SQL failure using the existing strict QueryPlan schema."""
+        parameter_metadata = json.dumps(
+            [parameter.model_dump(mode="json") for parameter in failed_plan.parameters]
+        )
+        return await self.generate(
+            model_group=model_group,
+            system_prompt=_sql_repair_system_prompt(dialect),
+            user_prompt=(
+                f"Original user question:\n{question}\n\n"
+                f"Database dialect:\n{dialect.value}\n\n"
+                f"Failed SQL:\n{failed_plan.sql or ''}\n\n"
+                "Parameter metadata (JSON):\n"
+                f"{parameter_metadata}"
+                f"\n\nSanitized database error:\n{database_error}\n\n"
+                "Approved semantic catalog and schema context (JSON):\n"
+                f"{catalog.model_dump_json()}\n{schema_snapshot.model_dump_json()}"
+            ),
+            generation_stage="sql_repair",
+            database_dialect=dialect,
+        )
+
+    async def _generate_with_correction[OutputT: BaseModel](
+        self,
+        *,
+        model_alias: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: type[OutputT],
+    ) -> tuple[OutputT, str | None, int]:
+        try:
+            output, actual_model = await self._generate_once(
+                model_alias=model_alias,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=output_type,
+            )
+            return output, actual_model, 0
+        except Prompt2InsightError as first_failure:
+            correction_prompt = user_prompt
+            if first_failure.code is ErrorCode.LLM_INVALID_OUTPUT:
+                correction_prompt = (
+                    f"{user_prompt}\n\nYour previous response did not match the required JSON "
+                    "schema. "
+                    "Return only a corrected JSON object that exactly matches it."
+                )
+            try:
+                output, actual_model = await self._generate_once(
+                    model_alias=model_alias,
+                    system_prompt=system_prompt,
+                    user_prompt=correction_prompt,
+                    output_type=output_type,
+                )
+                return output, actual_model, 1
+            except Prompt2InsightError as second_failure:
+                raise second_failure from first_failure
+
+    async def _generate_once[OutputT: BaseModel](
+        self,
+        *,
+        model_alias: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: type[OutputT],
+    ) -> tuple[OutputT, str | None]:
+        try:
+            response = await self._client.chat.completions.create(
+                model=model_alias,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": output_type.__name__,
+                        "strict": True,
+                        "schema": _strict_json_schema(output_type),
+                    },
+                },
+                temperature=0,
+                extra_body=self._thinking_options,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if _is_structured_schema_rejection(exc):
+                raise Prompt2InsightError(
+                    ErrorCode.LLM_INVALID_OUTPUT,
+                    "The model provider rejected the structured response schema.",
+                ) from exc
+            raise Prompt2InsightError(
+                ErrorCode.LLM_UNAVAILABLE,
+                "The model gateway is unavailable.",
+                retryable=True,
+            ) from exc
+
+        try:
+            content = response.choices[0].message.content
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise Prompt2InsightError(
+                ErrorCode.LLM_INVALID_OUTPUT,
+                "The model returned a malformed structured response.",
+                retryable=True,
+            ) from exc
+        if not content:
+            raise Prompt2InsightError(
+                ErrorCode.LLM_INVALID_OUTPUT,
+                "The model returned no structured output.",
+                retryable=True,
+            )
+
+        try:
+            output = output_type.model_validate_json(content)
+        except ValidationError as exc:
+            raise Prompt2InsightError(
+                ErrorCode.LLM_INVALID_OUTPUT,
+                "The model returned invalid structured output.",
+                retryable=True,
+            ) from exc
+
+        return output, cast(Any, response).model
+
+    @staticmethod
+    def _latency_ms(started_at: float) -> int:
+        return round((perf_counter() - started_at) * 1000)
+
+    def _metadata(
+        self,
+        *,
+        actual_model: str | None,
+        configured_model: str,
+        latency_ms: int,
+        retry_count: int,
+        generation_stage: str | None,
+        database_dialect: SQLDialect | None,
+        fallback_used: bool = False,
+        fallback_reason: str | None = None,
+    ) -> ModelExecutionMetadata:
+        return ModelExecutionMetadata(
+            actual_model=actual_model,
+            provider=self._provider,
+            model=actual_model or configured_model,
+            latency_ms=latency_ms,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            retry_count=retry_count,
+            generation_stage=generation_stage,
+            database_dialect=database_dialect,
+        )
+
+
+def _planner_system_prompt(dialect: SQLDialect) -> str:
+    return f"""You are the Prompt2Insight query planner. The user may write in English,
+Modern Standard Arabic, Egyptian Arabic, or mixed Arabic/English. Understand the request
+directly; do not translate or alter database identifiers. Treat the current user question as a
+continuation of the supplied conversation when prior turns are present. Resolve references such
+as that, those, it, this, same, previous, and comparative follow-ups from the most recent relevant
+turn and structured BI state. Use only physical tables and columns
+present in the supplied schema context, and never invent schema objects. The semantic catalog is
+business-definition guidance: prefer a catalog metric or dimension expression when it directly
+matches the user's intent, but do not require every calculation to have a catalog ID. Derived
+metrics and ordinary analytical SQL expressions are allowed, including AVG, MIN, MAX, COUNT,
+COUNT(DISTINCT ...), arithmetic, CASE, DATE_TRUNC, and EXTRACT. Use straightforward
+{dialect.value} SELECT-only SQL and {dialect.value} syntax. Parameterize user-supplied literal
+values. Every parameter must include its correct type: use string for text, integer for whole
+numbers, number for decimal values, boolean for true/false, date for YYYY-MM-DD, datetime for a
+narrow ISO-8601 timestamp such as 2026-08-14T10:30:00, and null only for null. Every non-null
+parameter value must be encoded as a string: integer "2018", number "500.25", boolean "true" or
+"false", date "2015-01-01", datetime ISO-8601, and string literal text; use null only with a
+null value. The type controls backend interpretation. Use schema column types to choose parameter
+types whenever possible; do not rely on SQL casts to repair parameter typing. For year ranges,
+prefer half-open intervals such as >= :start_date and < :end_date with date parameters. Do not
+use substring matching (LIKE, ILIKE, or wildcard patterns) for categorical text filters by
+default. For categorical dimensions named city, state, region, country, category, sub_category,
+segment, ship_mode, or product_name, use case-insensitive, trimmed exact matching:
+LOWER(TRIM(column)) = LOWER(TRIM(:parameter)). For example, filter a qualified city column as
+LOWER(TRIM(analytics.sales.city)) = LOWER(TRIM(:city_name)). Do not apply LOWER or TRIM to
+identifier-like fields such as order_id, customer_id, or product_id; compare those with exact
+equality (column = :parameter). Do not execute SQL. Return only the required structured result. Use
+needs_clarification only when the business intent is genuinely ambiguous, and unsupported when
+appropriate. The backend independently enforces physical schema access, read-only SQL, cost,
+timeout, and row limits."""
+
+
+def _sql_repair_system_prompt(dialect: SQLDialect) -> str:
+    return f"""You repair a Prompt2Insight {dialect.value} query after one recoverable validation
+or database execution error. Return a complete QueryPlan using the required strict schema. Preserve
+the original analytical intent and response language. Change only SQL and typed parameters needed to
+fix the supplied validation or database error. Never encode multiple values as one comma-separated
+scalar parameter: use a separately typed parameter for each value in a small IN list. Use only
+supplied physical tables and columns. The semantic catalog is business guidance, not authorization.
+Produce SELECT-only SQL, parameterize literal
+values, and preserve the QueryParameter name/type/value structure with string-or-null values.
+Never weaken or bypass validation, row limits, EXPLAIN, cost limits, or read-only execution. Return
+status ready with repaired SQL when repair is possible; otherwise return unsupported. Do not
+execute SQL and return only the required structured JSON result."""
+
+
+class LiteLLMGateway(VLLMGateway):
+    """LiteLLM proxy gateway; provider-specific options live in the proxy config."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: float = 60,
+        client: Any | None = None,
+    ) -> None:
+        super().__init__(
+            base_url=base_url,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+            client=client,
+            provider="litellm",
+        )
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "LiteLLMGateway":
+        return cls(
+            base_url=settings.litellm_base_url,
+            api_key=settings.litellm_master_key,
+            timeout_seconds=settings.litellm_timeout_seconds,
+        )
+
+
+def _strict_json_schema(output_type: type[BaseModel]) -> dict[str, Any]:
+    schema = output_type.model_json_schema()
+    _require_all_object_properties(schema)
+    return schema
+
+
+def _is_structured_schema_rejection(error: Exception) -> bool:
+    message = str(error).lower()
+    return getattr(error, "status_code", None) == 400 and any(
+        marker in message
+        for marker in (
+            "invalid json schema",
+            "response_format",
+            "integer_number_overlap",
+        )
+    )
+
+
+def _require_all_object_properties(schema: Any) -> None:
+    if isinstance(schema, dict):
+        if schema.get("type") == "object":
+            properties = schema.get("properties")
+            if not isinstance(properties, dict):
+                raise ValueError("Strict output schemas cannot contain open object maps.")
+            schema["required"] = list(properties)
+            schema["additionalProperties"] = False
+        for value in schema.values():
+            _require_all_object_properties(value)
+    elif isinstance(schema, list):
+        for value in schema:
+            _require_all_object_properties(value)
