@@ -27,6 +27,11 @@ test("chat fills the viewport with the composer below the scrolling thread", () 
   assert.match(messageThread, /min-height:\s*0/);
 });
 
+test("sent messages stay on the physical right in both layout directions", () => {
+  assert.match(css, /\.message-user\s*\{[^}]*flex-direction:\s*row-reverse/);
+  assert.match(css, /\[dir="rtl"\] \.message-user\s*\{[^}]*flex-direction:\s*row/);
+});
+
 test("conversation history entries reopen the full thread", () => {
   assert.match(component, /getConversation\(conversationId\)/);
   assert.match(component, /href=\{`\/chat\/\$\{item\.id\}`\}/);
