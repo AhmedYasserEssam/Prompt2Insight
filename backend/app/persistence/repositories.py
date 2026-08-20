@@ -6,6 +6,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.analytics.run_analytics_request import PlanningContext
+from app.application.conversations.conversation_context import (
+    ConversationMemoryMessage,
+    estimate_tokens,
+    redact_sensitive_text,
+)
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import AnalyticsRequest, AnalyticsResponse
 from app.domain.databases.connection_profiles import ConnectionProfileInput, ConnectionProfileView
@@ -42,13 +47,17 @@ class ConversationRepository:
         title: str = "New conversation",
         language: str = "auto",
         context_state: dict[str, object] | None = None,
+        title_is_manual: bool = False,
     ) -> ConversationRecord:
         async with self._session_factory() as session, session.begin():
             record = ConversationRecord(
                 connection_profile_id=connection_id,
                 title=title,
                 language=language,
-                context_state=dict(context_state) if context_state is not None else {},
+                context_state={
+                    **(dict(context_state) if context_state is not None else {}),
+                    **({"title_source": "manual"} if title_is_manual else {}),
+                },
             )
             session.add(record)
             await session.flush()
@@ -91,6 +100,7 @@ class ConversationRepository:
         title: str | None = None,
         language: str | None = None,
         summary: str | None = None,
+        title_is_manual: bool = False,
     ) -> ConversationRecord | None:
         async with self._session_factory() as session, session.begin():
             record = await session.get(ConversationRecord, conversation_id)
@@ -98,6 +108,8 @@ class ConversationRepository:
                 return None
             if title is not None:
                 record.title = title
+                if title_is_manual:
+                    record.context_state = {**record.context_state, "title_source": "manual"}
             if language is not None:
                 record.language = language
             if summary is not None:
@@ -226,6 +238,114 @@ class ConversationRepository:
             await session.flush()
             await session.refresh(record)
             return record
+
+    async def complete_success(
+        self,
+        *,
+        user_message_id: UUID,
+        conversation_id: UUID,
+        assistant_content: str,
+        request_id: UUID,
+        context_state: dict[str, object],
+        automatic_title: str | None,
+    ) -> tuple[MessageRecord, MessageRecord] | None:
+        """Atomically persist the successful reply and its derived BI state."""
+        async with self._session_factory() as session, session.begin():
+            conversation = await session.scalar(
+                select(ConversationRecord)
+                .where(ConversationRecord.id == conversation_id)
+                .with_for_update()
+            )
+            user = await session.get(MessageRecord, user_message_id, with_for_update=True)
+            if conversation is None or user is None or user.conversation_id != conversation_id:
+                return None
+            latest_sequence = await session.scalar(
+                select(func.max(MessageRecord.sequence_number)).where(
+                    MessageRecord.conversation_id == conversation_id
+                )
+            )
+            assistant = MessageRecord(
+                conversation_id=conversation_id,
+                sequence_number=(latest_sequence or 0) + 1,
+                role="assistant",
+                content=assistant_content,
+                message_metadata={"request_id": str(request_id), "status": "completed"},
+            )
+            session.add(assistant)
+            user.message_metadata = {
+                "status": "completed",
+                "assistant_message_id": str(assistant.id),
+            }
+            state = dict(context_state)
+            if conversation.context_state.get("title_source") == "manual":
+                state["title_source"] = "manual"
+            elif automatic_title and conversation.title == "New conversation":
+                conversation.title = automatic_title
+                state["title_source"] = "automatic"
+            conversation.context_state = state
+            conversation.updated_at = func.now()
+            await session.flush()
+            await session.refresh(user)
+            await session.refresh(assistant)
+            return user, assistant
+
+    async def summarize_if_needed(
+        self,
+        conversation_id: UUID,
+        *,
+        threshold_tokens: int,
+        keep_messages: int,
+        max_chars: int,
+    ) -> bool:
+        """Compact old message references once; audit messages themselves are retained."""
+        async with self._session_factory() as session, session.begin():
+            conversation = await session.scalar(
+                select(ConversationRecord)
+                .where(ConversationRecord.id == conversation_id)
+                .with_for_update()
+            )
+            if conversation is None:
+                return False
+            messages = list(
+                (
+                    await session.scalars(
+                        select(MessageRecord)
+                        .where(MessageRecord.conversation_id == conversation_id)
+                        .order_by(MessageRecord.sequence_number.asc(), MessageRecord.id.asc())
+                    )
+                ).all()
+            )
+            state = dict(conversation.context_state)
+            watermark_value = state.get("summary_through_sequence", 0)
+            watermark = watermark_value if isinstance(watermark_value, int) else 0
+            unsummarized = [message for message in messages if message.sequence_number > watermark]
+            unsummarized_text = "\n".join(message.content for message in unsummarized)
+            if estimate_tokens(unsummarized_text) < threshold_tokens:
+                return False
+            to_summarize = unsummarized[:-keep_messages]
+            if not to_summarize:
+                return False
+            user_questions = [
+                redact_sensitive_text(message.content)
+                for message in to_summarize
+                if message.role == "user"
+            ]
+            facts = {
+                key: state.get(key)
+                for key in ("metrics", "dimensions", "filters", "last_question")
+                if state.get(key) is not None
+            }
+            summary = (
+                "Earlier analytical context (untrusted reference): "
+                + json.dumps(
+                    {"questions": user_questions[-10:], "facts": facts}, ensure_ascii=False
+                )
+            )[:max_chars]
+            conversation.summary = summary
+            state["summary_through_sequence"] = to_summarize[-1].sequence_number
+            conversation.context_state = state
+            conversation.updated_at = func.now()
+            return True
 
 
 class AnalyticsRequestRepository:
@@ -358,6 +478,15 @@ class AnalyticsRequestRepository:
                 raise Prompt2InsightError(
                     ErrorCode.SCHEMA_CHANGED, "Schema dialect no longer matches profile."
                 )
+            messages = list(
+                (
+                    await session.scalars(
+                        select(MessageRecord)
+                        .where(MessageRecord.conversation_id == conversation_id)
+                        .order_by(MessageRecord.sequence_number.asc(), MessageRecord.id.asc())
+                    )
+                ).all()
+            )
             return PlanningContext(
                 dialect=schema_snapshot.dialect,
                 catalog=AnalyticsCatalog.model_validate(catalog.content),
@@ -366,6 +495,18 @@ class AnalyticsRequestRepository:
                 schema_snapshot_id=snapshot.id,
                 connection_profile_id=profile.id,
                 credential_reference=profile.credential_reference,
+                language=conversation.language,
+                summary=conversation.summary,
+                context_state=dict(conversation.context_state),
+                messages=tuple(
+                    ConversationMemoryMessage(
+                        sequence_number=message.sequence_number,
+                        role=message.role,
+                        content=message.content,
+                    )
+                    for message in messages
+                    if message.role in {"user", "assistant"}
+                ),
             )
 
 

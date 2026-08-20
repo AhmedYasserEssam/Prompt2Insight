@@ -90,6 +90,7 @@ async def create_conversation(
         connection_id=request.connection_id,
         title=request.title or "New conversation",
         language=request.language.value,
+        title_is_manual=request.title is not None,
     )
     return await _detail(conversations, record)
 
@@ -140,6 +141,7 @@ async def update_conversation(
             conversation_id,
             title=request.title if "title" in request.model_fields_set else None,
             language=request.language.value if request.language is not None else None,
+            title_is_manual="title" in request.model_fields_set,
         )
         assert record is not None
     return await _detail(conversations, record)

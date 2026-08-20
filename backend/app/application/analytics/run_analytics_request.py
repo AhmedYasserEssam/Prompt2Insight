@@ -1,7 +1,7 @@
 import json
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from app.application.analytics.answer_fallback import deterministic_answer
@@ -11,6 +11,10 @@ from app.application.analytics.answer_validation import (
 from app.application.analytics.chart_recommendation import ChartPolicy, recommend_chart
 from app.application.analytics.execute_query_plan import ExecutedPlan, QueryPlanExecutor
 from app.application.analytics.resolve_language import resolve_response_language
+from app.application.conversations.conversation_context import (
+    ConversationMemoryMessage,
+    build_planner_context,
+)
 from app.core.config import Settings
 from app.core.errors import ErrorCode, Prompt2InsightError
 from app.domain.analytics.models import (
@@ -21,6 +25,7 @@ from app.domain.analytics.models import (
     ModelExecutionMetadata,
     QueryPlan,
     ResultTable,
+    TitleOutput,
 )
 from app.domain.databases.connector import SQLDatabaseConnector
 from app.domain.databases.models import SchemaSnapshot, SQLDialect
@@ -39,6 +44,10 @@ class PlanningContext:
     schema_snapshot_id: UUID
     connection_profile_id: UUID | None = None
     credential_reference: str | None = None
+    language: str = "auto"
+    summary: str | None = None
+    context_state: dict[str, object] | None = None
+    messages: tuple[ConversationMemoryMessage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,6 +90,7 @@ class QueryPlanner(Protocol):
         catalog: AnalyticsCatalog,
         model_group: ModelGroup[QueryPlan],
         schema_snapshot: SchemaSnapshot | None = None,
+        conversation_context: str | None = None,
     ) -> GenerationResult[QueryPlan]: ...
 
     async def repair(
@@ -178,6 +188,16 @@ class AnalyticsRequestService:
                 catalog=context.catalog,
                 schema_snapshot=context.schema_snapshot,
                 model_group=self._planner_model_group,
+                conversation_context=build_planner_context(
+                    catalog=context.catalog,
+                    schema_snapshot=context.schema_snapshot,
+                    language=context.language,
+                    summary=context.summary,
+                    state=context.context_state or {},
+                    messages=context.messages,
+                    current_question=request.question,
+                    settings=self._settings or Settings(),
+                ),
             )
             planner_metadata = plan_result.metadata
             logger.debug(
@@ -219,9 +239,7 @@ class AnalyticsRequestService:
                 if execution.result.row_count == 0:
                     answer_outcome = _AnswerOutcome(
                         output=AnswerOutput(
-                            answer=deterministic_answer(
-                                table, plan_result.output.response_language
-                            )
+                            answer=deterministic_answer(table, plan_result.output.response_language)
                         ),
                         metadata=None,
                         warnings=[],
@@ -409,9 +427,7 @@ class AnalyticsRequestService:
                     database_dialect=dialect,
                 )
             except Prompt2InsightError as regeneration_failure:
-                self._log_answer_recovery(
-                    request.request_id, regeneration_failure, "regeneration"
-                )
+                self._log_answer_recovery(request.request_id, regeneration_failure, "regeneration")
                 return _AnswerOutcome(
                     fallback, first.metadata, [_answer_fallback_warning(language)]
                 )
@@ -423,9 +439,7 @@ class AnalyticsRequestService:
                     execution_context=execution_context,
                 )
             except Prompt2InsightError as second_failure:
-                self._log_answer_recovery(
-                    request.request_id, second_failure, "second_validation"
-                )
+                self._log_answer_recovery(request.request_id, second_failure, "second_validation")
                 return _AnswerOutcome(
                     fallback, regenerated.metadata, [_answer_fallback_warning(language)]
                 )
@@ -438,9 +452,7 @@ class AnalyticsRequestService:
         return _AnswerOutcome(first.output, first.metadata, [])
 
     @staticmethod
-    def _log_answer_recovery(
-        request_id: UUID, error: Prompt2InsightError, stage: str
-    ) -> None:
+    def _log_answer_recovery(request_id: UUID, error: Prompt2InsightError, stage: str) -> None:
         logger.warning(
             "Answer recovery request_id=%s stage=%s error_code=%s detail=%s",
             request_id,
@@ -469,6 +481,33 @@ class AnalyticsRequestService:
 
     async def get(self, request_id: UUID) -> AnalyticsResponse | None:
         return await self._repository.get(request_id)
+
+    async def title_for(self, *, question: str, language: str) -> str | None:
+        """Best-effort title generation; callers must fall back without failing analysis."""
+        if self._answerer is None or self._answer_model_group is None:
+            return None
+        result = cast(
+            GenerationResult[TitleOutput],
+            await self._answerer.generate(
+                model_group=cast(
+                    ModelGroup[AnswerOutput],
+                    ModelGroup(
+                        "title",
+                        self._answer_model_group.primary_model,
+                        self._answer_model_group.fallback_model,
+                        TitleOutput,
+                    ),
+                ),
+                system_prompt=(
+                    f"Create a concise conversation title in {language}. "
+                    "Return only the required JSON."
+                ),
+                user_prompt=f"First successful analytical question:\n{question}",
+                generation_stage="title",
+            ),
+        )
+        output = result.output
+        return output.title if isinstance(output, TitleOutput) else None
 
 
 def _answer_system_prompt(language: str) -> str:

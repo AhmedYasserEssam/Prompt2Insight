@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     answer_primary_model: str = "answer-primary"
     answer_fallback_model: str = "answer-fallback"
 
+    # The planner's selected model determines this input window.  The conservative
+    # estimator in conversation_context is used when no model tokenizer is available.
+    conversation_context_token_budget: int = Field(default=8_000, ge=512)
+    conversation_output_token_reserve: int = Field(default=1_500, ge=128)
+    conversation_recent_message_limit: int = Field(default=12, ge=1, le=100)
+    conversation_result_sample_rows: int = Field(default=5, ge=0, le=20)
+    conversation_summary_threshold_tokens: int = Field(default=6_000, ge=512)
+    conversation_summary_keep_messages: int = Field(default=6, ge=1, le=50)
+    conversation_summary_max_chars: int = Field(default=4_000, ge=256, le=20_000)
+
     query_timeout_ms: int = 8000
     lock_timeout_ms: int = 2000
     max_output_rows: int = 1000

@@ -61,6 +61,7 @@ def get_conversation_question_service() -> ConversationQuestionService:
         get_conversation_repository(),
         get_connection_profile_repository(),
         get_analytics_request_service(),
+        get_settings(),
     )
 
 

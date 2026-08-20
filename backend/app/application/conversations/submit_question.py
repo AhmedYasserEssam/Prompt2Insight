@@ -4,6 +4,8 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 
 from app.application.analytics.run_analytics_request import AnalyticsRequestService
+from app.application.conversations.conversation_context import redact_sensitive_text
+from app.core.config import Settings
 from app.core.errors import Prompt2InsightError
 from app.domain.analytics.models import (
     AnalyticsRequest,
@@ -11,7 +13,7 @@ from app.domain.analytics.models import (
     AnalyticsStatus,
     ResponseLanguage,
 )
-from app.persistence.models import MessageRecord
+from app.persistence.models import ConversationRecord, MessageRecord
 from app.persistence.repositories import ConnectionProfileRepository, ConversationRepository
 
 
@@ -39,10 +41,12 @@ class ConversationQuestionService:
         conversations: ConversationRepository,
         connections: ConnectionProfileRepository,
         analytics: AnalyticsRequestService,
+        settings: Settings | None = None,
     ) -> None:
         self._conversations = conversations
         self._connections = connections
         self._analytics = analytics
+        self._settings = settings or Settings()
 
     async def submit(
         self,
@@ -51,6 +55,7 @@ class ConversationQuestionService:
         client_message_id: UUID,
         content: str,
     ) -> QuestionSubmission:
+        content = redact_sensitive_text(content)
         conversation = await self._conversations.get_conversation(conversation_id)
         if conversation is None:
             raise ConversationNotFoundError
@@ -106,22 +111,57 @@ class ConversationQuestionService:
                 failed, None, response, str(failed.message_metadata["error_code"])
             )
 
-        assistant = await self._conversations.add_message(
+        if response.status in {AnalyticsStatus.SUCCESS, AnalyticsStatus.EMPTY_RESULT}:
+            state = _bi_state(content, response, self._settings)
+            watermark = conversation.context_state.get("summary_through_sequence")
+            if isinstance(watermark, int):
+                state["summary_through_sequence"] = watermark
+        else:
+            state = dict(conversation.context_state)
+        automatic_title = await self._automatic_title(conversation, content, response)
+        completed_pair = await self._conversations.complete_success(
+            user_message_id=user_message.id,
             conversation_id=conversation_id,
-            role="assistant",
-            content=response.answer or "Analysis completed.",
-            message_metadata={"request_id": str(client_message_id), "status": "completed"},
+            assistant_content=response.answer or "Analysis completed.",
+            request_id=client_message_id,
+            context_state=state,
+            automatic_title=automatic_title,
         )
-        assert assistant is not None
-        completed = await self._conversations.update_message_metadata(
-            user_message.id,
-            message_metadata={
-                "status": "completed",
-                "assistant_message_id": str(assistant.id),
-            },
-        )
-        assert completed is not None
+        assert completed_pair is not None
+        completed, assistant = completed_pair
+        # Compaction is best effort and happens after the committed analytical result;
+        # it can never turn a successful answer into a failure.
+        try:
+            await self._conversations.summarize_if_needed(
+                conversation_id,
+                threshold_tokens=self._settings.conversation_summary_threshold_tokens,
+                keep_messages=self._settings.conversation_summary_keep_messages,
+                max_chars=self._settings.conversation_summary_max_chars,
+            )
+        except Exception:
+            pass
         return QuestionSubmission(completed, assistant, response)
+
+    async def _automatic_title(
+        self,
+        conversation: ConversationRecord,
+        question: str,
+        response: AnalyticsResponse,
+    ) -> str | None:
+        if response.status not in {AnalyticsStatus.SUCCESS, AnalyticsStatus.EMPTY_RESULT}:
+            return None
+        title = conversation.title
+        state = conversation.context_state
+        language = conversation.language
+        if title != "New conversation" or state.get("title_source") == "manual":
+            return None
+        try:
+            generated = await self._analytics.title_for(question=question, language=language)
+            if generated:
+                return generated[:80]
+        except Exception:
+            pass
+        return " ".join(question.split())[:80]
 
     async def _existing(
         self, message: MessageRecord, conversation_id: UUID, content: str
@@ -158,3 +198,22 @@ class ConversationQuestionService:
         )
         assert updated is not None
         return updated
+
+
+def _bi_state(question: str, response: AnalyticsResponse, settings: Settings) -> dict[str, object]:
+    """Persist only bounded facts from a completed, validated analytical result."""
+    plan = response.query_plan
+    table = response.table
+    assert plan is not None and table is not None
+    table_data = table.model_dump(mode="json")
+    sample = table_data["rows"][: settings.conversation_result_sample_rows]
+    return {
+        "last_question": question,
+        "last_sql": (response.sql or "")[:8000],
+        "metrics": plan.metric_ids[:50],
+        "dimensions": plan.dimension_ids[:50],
+        "filters": [item.model_dump(mode="json") for item in plan.filters[:50]],
+        "result_columns": table.columns[:100],
+        "chart_type": response.chart.chart_type if response.chart else None,
+        "result_sample": sample,
+    }

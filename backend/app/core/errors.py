@@ -28,6 +28,7 @@ class ErrorCode(StrEnum):
     EXECUTION_FAILED = "execution_failed"
     CATALOG_STALE = "catalog_stale"
     SCHEMA_CHANGED = "schema_changed"
+    CONTEXT_TOO_LARGE = "context_too_large"
 
 
 class Prompt2InsightError(Exception):

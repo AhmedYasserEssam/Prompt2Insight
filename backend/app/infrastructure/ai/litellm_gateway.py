@@ -169,12 +169,13 @@ class VLLMGateway:
         catalog: AnalyticsCatalog,
         model_group: ModelGroup[QueryPlan],
         schema_snapshot: SchemaSnapshot | None = None,
+        conversation_context: str | None = None,
     ) -> GenerationResult[QueryPlan]:
         """Plan from supplied semantic context only; never execute SQL here."""
         return await self.generate(
             model_group=model_group,
             system_prompt=_planner_system_prompt(dialect),
-            user_prompt=(
+            user_prompt=conversation_context or (
                 "User question:\n"
                 f"{question}\n\n"
                 "Approved semantic catalog and schema context (JSON):\n"
