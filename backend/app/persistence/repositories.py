@@ -636,15 +636,6 @@ class ConnectionProfileRepository:
                 return "catalog_needs_configuration"
             return "ready" if catalog.schema_snapshot_id == snapshot_id else "stale"
 
-    async def create_conversation(self, profile_id: UUID) -> UUID:
-        from uuid import uuid4
-
-        async with self._session_factory() as session:
-            conversation = ConversationRecord(id=uuid4(), connection_profile_id=profile_id)
-            session.add(conversation)
-            await session.commit()
-            return conversation.id
-
     async def get_schema_snapshot_record(self, profile_id: UUID) -> SchemaSnapshotRecord | None:
         async with self._session_factory() as session:
             record = await session.scalar(

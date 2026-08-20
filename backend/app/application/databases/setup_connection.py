@@ -84,7 +84,6 @@ class ConnectionSetupService:
             profile=profile,
             schema_state="ready",
             catalog_state="ready",
-            conversation_id=await self._repository.create_conversation(profile_id),
         )
 
     async def refresh_schema(self, profile_id: UUID) -> SchemaRefreshResult:

@@ -61,9 +61,6 @@ class RepositoryStub:
     async def state_for_snapshot(self, _: object, snapshot_id: object) -> str:
         return "ready" if snapshot_id == self.catalog_snapshot_id else "stale"
 
-    async def create_conversation(self, _: object):
-        return uuid4()
-
 
 class ConnectorStub:
     async def test_connection(self) -> None:
@@ -115,6 +112,17 @@ async def test_save_introspects_schema_after_successful_connection(
     assert repository.snapshot is not None
     assert progress.schema_state == "ready"
     assert progress.catalog_state == "catalog_needs_configuration"
+
+
+async def test_selecting_ready_connection_does_not_create_conversation() -> None:
+    repository = RepositoryStub()
+    repository.profile = repository.profile.model_copy(update={"state": "ready"})
+    service = ConnectionSetupService(repository)  # type: ignore[arg-type]
+
+    progress = await service.select(repository.profile.id)
+
+    assert progress.catalog_state == "ready"
+    assert progress.conversation_id is None
 
 
 async def test_refresh_changed_schema_creates_new_snapshot_and_marks_catalog_stale(

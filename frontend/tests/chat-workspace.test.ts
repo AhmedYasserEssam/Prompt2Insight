@@ -49,6 +49,15 @@ test("a new chat waits for message persistence before changing routes", () => {
   assert.ok(submit < navigate);
 });
 
+test("a new chat is not created before a non-empty first message is submitted", () => {
+  const emptyGuard = component.indexOf("if (!content || inFlight.current) return");
+  const create = component.indexOf("const created = await createConversation");
+
+  assert.notEqual(emptyGuard, -1);
+  assert.notEqual(create, -1);
+  assert.ok(emptyGuard < create);
+});
+
 test("retrying a failed message resubmits its content with a fresh id", () => {
   assert.match(
     component,
