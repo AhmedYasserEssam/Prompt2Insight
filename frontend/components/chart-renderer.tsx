@@ -21,8 +21,8 @@ import {
 const PALETTE = ["#2563eb", "#0f766e", "#9333ea", "#ea580c", "#0891b2", "#be123c", "#4d7c0f", "#7c3aed"];
 
 const switcherLabels = {
-  en: {bar: "Bar", horizontal_bar: "Horizontal bar", line: "Line", area: "Area", scatter: "Scatter", donut: "Donut", table: "Table", tableHint: "The formatted result table is shown below."},
-  ar: {bar: "أعمدة", horizontal_bar: "أعمدة أفقية", line: "خطي", area: "مساحة", scatter: "مبعثر", donut: "حلقي", table: "جدول", tableHint: "يظهر جدول النتائج المنسق أدناه."},
+  en: {bar: "Bar", horizontal_bar: "Horizontal bar", line: "Line", area: "Area", scatter: "Scatter", donut: "Donut", table: "Table", tableHint: "The formatted result table is shown below.", switcher: "Visualization type"},
+  ar: {bar: "أعمدة", horizontal_bar: "أعمدة أفقية", line: "خطي", area: "مساحة", scatter: "مبعثر", donut: "حلقي", table: "جدول", tableHint: "يظهر جدول النتائج المنسق أدناه.", switcher: "نوع الرسم البياني"},
 };
 
 export function ChartRenderer({
@@ -54,7 +54,7 @@ export function ChartRenderer({
       <div className="chart-heading">
         <figcaption>{model.title}</figcaption>
         {choices.length > 1 ? (
-          <div className="chart-switcher" role="group" aria-label="Visualization type">
+          <div className="chart-switcher" role="group" aria-label={text.switcher}>
             {choices.map((choice) => (
               <button
                 aria-pressed={selected === choice}

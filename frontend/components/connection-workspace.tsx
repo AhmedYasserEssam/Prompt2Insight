@@ -4,6 +4,7 @@ import {FormEvent, useEffect, useMemo, useState} from "react";
 import {AnalyticsChat} from "@/components/analytics-chat";
 import {CatalogConfigurator} from "@/components/catalog-configurator";
 import {ConnectionProfile, ConnectionProfileInput, listConnectionProfiles, refreshConnectionSchema, selectConnection, setupConnection, testConnection} from "@/lib/api";
+import {useDocumentLanguage} from "@/lib/document-language";
 
 type Locale = "en" | "ar";
 type ProfileState = ConnectionProfile["state"] | "all";
@@ -33,6 +34,7 @@ export function ConnectionWorkspace() {
   const [stateFilter, setStateFilter] = useState<ProfileState>("all");
   const [page, setPage] = useState(1);
   const t = copy[locale];
+  useDocumentLanguage(locale);
   const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null;
 
   useEffect(() => {

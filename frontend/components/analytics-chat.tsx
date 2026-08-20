@@ -12,6 +12,7 @@ import {
   tableStartsExpanded,
 } from "@/lib/analytics-presentation";
 import {ChartRenderer} from "@/components/chart-renderer";
+import {useDocumentLanguage} from "@/lib/document-language";
 
 const labels = {
   en: {
@@ -41,6 +42,7 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
   const activeLanguage = result?.language ?? (responseLanguage === "ar" ? "ar" : "en");
   const direction = useMemo(() => (activeLanguage === "ar" ? "rtl" : "ltr"), [activeLanguage]);
   const t = result?.language === "ar" ? labels.ar : labels.en;
+  useDocumentLanguage(activeLanguage);
   const completedResult =
     result?.status === "success" || result?.status === "empty_result";
   const warningGroups = partitionWarnings(result?.warnings ?? []);
@@ -106,7 +108,7 @@ export function AnalyticsChat({conversationId}: {conversationId: string}) {
         </button>
       </form>
 
-      {error ? <div className="card error">{error}</div> : null}
+      {error ? <div className="card error" role="alert">{error}</div> : null}
 
       {result ? (
         <section className="card response-stack" dir={direction} lang={result.language}>

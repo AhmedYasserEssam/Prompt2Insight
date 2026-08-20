@@ -11,8 +11,13 @@ import {
   type ConnectionProfile, type Conversation, type ConversationMessage,
   type ConversationSummary, type ResponseLanguage,
 } from "@/lib/api";
+import {useDocumentLanguage} from "@/lib/document-language";
 
 const CONNECTION_KEY = "prompt2insight.selected-connection";
+const chatCopy = {
+  en: {newChat: "New chat", search: "Search conversations", language: "Language", settings: "Settings & connections", message: "Message", placeholder: "Ask a data question", send: "Send", working: "Working…", openSidebar: "Open sidebar", closeSidebar: "Close sidebar", collapseSidebar: "Collapse sidebar", loading: "Loading conversation…", unavailable: "Conversation unavailable", startNew: "Start a new chat", emptyTitle: "What would you like to know?", emptyText: "Start a conversation with your connected data.", noConnection: "No active connection", retry: "Retry", failed: "Analysis failed."},
+  ar: {newChat: "محادثة جديدة", search: "البحث في المحادثات", language: "اللغة", settings: "الإعدادات والاتصالات", message: "الرسالة", placeholder: "اطرح سؤالاً عن البيانات", send: "إرسال", working: "جارٍ التنفيذ…", openSidebar: "فتح الشريط الجانبي", closeSidebar: "إغلاق الشريط الجانبي", collapseSidebar: "طي الشريط الجانبي", loading: "جارٍ تحميل المحادثة…", unavailable: "المحادثة غير متاحة", startNew: "بدء محادثة جديدة", emptyTitle: "ما الذي تريد معرفته؟", emptyText: "ابدأ محادثة مع بياناتك المتصلة.", noConnection: "لا يوجد اتصال نشط", retry: "إعادة المحاولة", failed: "فشل التحليل."},
+};
 
 export function ChatWorkspace({conversationId}: {conversationId?: string}) {
   const router = useRouter();
@@ -32,8 +37,14 @@ export function ChatWorkspace({conversationId}: {conversationId?: string}) {
   const inFlight = useRef(false);
   const retry = useRef<{content: string; id: string} | null>(null);
   const threadEnd = useRef<HTMLDivElement>(null);
+  const drawer = useRef<HTMLElement>(null);
+  const drawerTrigger = useRef<HTMLButtonElement>(null);
   const nearBottom = useRef(true);
   const loadVersion = useRef(0);
+  const resolvedLanguage = [...(conversation?.messages ?? [])].reverse().find((item) => item.metadata.analytics)?.metadata.analytics?.language;
+  const activeLanguage = conversation?.language === "ar" || resolvedLanguage === "ar" || (!conversation && language === "ar") ? "ar" : "en";
+  const t = chatCopy[activeLanguage];
+  useDocumentLanguage(activeLanguage);
 
   const refreshHistory = async () => setHistory((await listConversations()).items);
   useEffect(() => { void refreshHistory().catch((caught: unknown) => setError(message(caught))); }, []);
@@ -52,6 +63,23 @@ export function ChatWorkspace({conversationId}: {conversationId?: string}) {
     void getConversation(conversationId).then((item) => { if (loadVersion.current === version) { setConversation(item); setLanguage(item.language); } }).catch((caught: unknown) => { if (loadVersion.current === version) setError(message(caught)); }).finally(() => { if (loadVersion.current === version) setLoading(false); });
   }, [conversationId]);
   useEffect(() => { if (conversation && nearBottom.current) threadEnd.current?.scrollIntoView({block: "end"}); }, [conversation?.messages.length]);
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const focusable = () => [...(drawer.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), summary') ?? [])].filter((element) => element.offsetParent !== null);
+    focusable()[0]?.focus();
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); setDrawerOpen(false); return; }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0]; const last = items.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [drawerOpen]);
+  useEffect(() => { if (!drawerOpen) drawerTrigger.current?.focus(); }, [drawerOpen]);
 
   const activeProfile = profiles.find((item) => item.id === (conversation?.connection_id ?? connectionId));
   const filtered = history.filter((item) => item.title.toLowerCase().includes(query.toLowerCase()));
@@ -97,24 +125,34 @@ export function ChatWorkspace({conversationId}: {conversationId?: string}) {
     try { await deleteConversation(item.id); await refreshHistory(); if (item.id === conversationId) router.replace("/chat/new"); } catch (caught) { setError(message(caught)); }
   }
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } };
+  async function changeLanguage(next: ResponseLanguage) {
+    setLanguage(next);
+    if (!conversation) return;
+    try {
+      const updated = await updateConversation(conversation.id, {language: next});
+      setConversation(updated);
+      await refreshHistory();
+    } catch (caught) { setError(message(caught)); }
+  }
 
-  return <div className={`chat-shell ${collapsed ? "sidebar-collapsed" : ""}`}>
-    <aside className={`chat-sidebar ${drawerOpen ? "drawer-open" : ""}`} aria-label="Conversation history">
-      <div className="sidebar-top"><button className="secondary collapse-button" type="button" aria-label="Collapse sidebar" onClick={() => setCollapsed((value) => !value)}>☰</button><Link className="new-chat" href="/chat/new" onClick={() => setDrawerOpen(false)}>+ New chat</Link></div>
-      <input aria-label="Search conversations" placeholder="Search conversations" value={query} onChange={(event) => setQuery(event.target.value)} />
+  return <div className={`chat-shell ${collapsed ? "sidebar-collapsed" : ""}`} dir={activeLanguage === "ar" ? "rtl" : "ltr"} lang={activeLanguage}>
+    <aside ref={drawer} className={`chat-sidebar ${drawerOpen ? "drawer-open" : ""}`} aria-label="Conversation history" aria-modal={drawerOpen || undefined} role={drawerOpen ? "dialog" : undefined}>
+      <div className="sidebar-top"><button className="secondary collapse-button" type="button" aria-label={t.collapseSidebar} onClick={() => setCollapsed((value) => !value)}>☰</button><Link className="new-chat" href="/chat/new" onClick={() => setDrawerOpen(false)}>+ {t.newChat}</Link></div>
+      <input aria-label={t.search} placeholder={t.search} value={query} onChange={(event) => setQuery(event.target.value)} />
       <nav className="conversation-history">{filtered.map((item) => <div className={`history-item ${item.id === conversationId ? "active" : ""}`} key={item.id}><Link href={`/chat/${item.id}`} onClick={() => setDrawerOpen(false)}>{item.title}</Link><details><summary aria-label={`Actions for ${item.title}`}>•••</summary><div className="history-actions"><button type="button" onClick={() => void rename(item)}>Rename</button><button type="button" onClick={() => void archive(item)}>Archive</button><button type="button" className="danger-button" onClick={() => void remove(item)}>Delete</button></div></details></div>)}</nav>
-      <div className="sidebar-bottom"><Link href="/">Settings & connections</Link><label>Language<select value={language} onChange={(event) => setLanguage(event.target.value as ResponseLanguage)}><option value="auto">Auto</option><option value="en">English</option><option value="ar">العربية</option></select></label></div>
+      <div className="sidebar-bottom"><Link href="/">{t.settings}</Link><label>{t.language}<select value={language} onChange={(event) => void changeLanguage(event.target.value as ResponseLanguage)}><option value="auto">Auto</option><option value="en">English</option><option value="ar">العربية</option></select></label></div>
     </aside>
-    {drawerOpen ? <button className="drawer-backdrop" aria-label="Close sidebar" onClick={() => setDrawerOpen(false)} /> : null}
-    <main className="chat-main"><header className="chat-header"><button className="secondary mobile-menu" type="button" aria-label="Open sidebar" onClick={() => setDrawerOpen(true)}>☰</button><div><strong>{conversation?.title ?? "New chat"}</strong><small>{activeProfile ? `${activeProfile.name} · ${activeProfile.state}` : "No active connection"}</small></div><select aria-label="Active connection" value={connectionId} onChange={(event) => { setConnectionId(event.target.value); window.localStorage.setItem(CONNECTION_KEY, event.target.value); }} disabled={Boolean(conversation)}>{profiles.filter((item) => item.state === "ready").map((item) => <option key={item.id} value={item.id}>{item.name} · {item.state}</option>)}</select></header>
-      <section className="message-thread" aria-live="polite" onScroll={(event) => { const element = event.currentTarget; nearBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; }}>{loading ? <p>Loading conversation…</p> : null}{error && !conversation ? <div className="chat-error"><p>Conversation unavailable: {error}</p><Link href="/chat/new">Start a new chat</Link></div> : null}{!loading && !error && !conversation ? <div className="chat-empty"><h1>What would you like to know?</h1><p>Start a conversation with your connected data.</p></div> : null}{conversation?.messages.map((item) => <MessageBubble key={item.id} item={item} onRetry={() => void send()} />)}{error && conversation ? <div className="chat-error" role="alert">{error}<button type="button" className="secondary" onClick={() => void send()}>Retry</button></div> : null}<div ref={threadEnd} /></section>
-      <form className="chat-composer" onSubmit={send}><textarea aria-label="Message" placeholder="Ask a data question" value={draft} disabled={sending} onChange={(event) => { saveDraft(event.target.value); resize(event.currentTarget); }} onKeyDown={onKeyDown} /><button disabled={sending || !draft.trim()}>{sending ? "Working…" : "Send"}</button></form>
+    {drawerOpen ? <button className="drawer-backdrop" aria-label={t.closeSidebar} onClick={() => setDrawerOpen(false)} /> : null}
+    <main className="chat-main"><header className="chat-header"><button ref={drawerTrigger} className="secondary mobile-menu" type="button" aria-label={t.openSidebar} aria-expanded={drawerOpen} onClick={() => setDrawerOpen(true)}>☰</button><div><strong>{conversation?.title ?? t.newChat}</strong><small>{activeProfile ? `${activeProfile.name} · ${activeProfile.state}` : t.noConnection}</small></div><select aria-label="Active connection" value={connectionId} onChange={(event) => { setConnectionId(event.target.value); window.localStorage.setItem(CONNECTION_KEY, event.target.value); }} disabled={Boolean(conversation)}>{profiles.filter((item) => item.state === "ready").map((item) => <option key={item.id} value={item.id}>{item.name} · {item.state}</option>)}</select></header>
+      <section className="message-thread" aria-live="polite" aria-busy={loading || sending} onScroll={(event) => { const element = event.currentTarget; nearBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; }}>{loading ? <p>{t.loading}</p> : null}{error && !conversation ? <div className="chat-error"><p>{t.unavailable}: {error}</p><Link href="/chat/new">{t.startNew}</Link></div> : null}{!loading && !error && !conversation ? <div className="chat-empty"><h1>{t.emptyTitle}</h1><p>{t.emptyText}</p></div> : null}{conversation?.messages.map((item) => <MessageBubble key={item.id} item={item} onRetry={() => void send()} retryLabel={t.retry} failedLabel={t.failed} language={activeLanguage} />)}{error && conversation ? <div className="chat-error" role="alert">{error}<button type="button" className="secondary" onClick={() => void send()}>{t.retry}</button></div> : null}<div ref={threadEnd} /></section>
+      <form className="chat-composer" onSubmit={send}><textarea aria-label={t.message} aria-describedby={error ? "composer-error" : undefined} placeholder={t.placeholder} value={draft} disabled={sending} onChange={(event) => { saveDraft(event.target.value); resize(event.currentTarget); }} onKeyDown={onKeyDown} /><button disabled={sending || !draft.trim()}>{sending ? t.working : t.send}</button>{error ? <span id="composer-error" className="sr-only">{error}</span> : null}</form>
     </main>
   </div>;
 }
 
-function MessageBubble({item, onRetry}: {item: ConversationMessage; onRetry: () => void}) {
-  return <article className={`message message-${item.role}`}><div className="message-content">{item.content}</div>{item.role === "assistant" && item.metadata.analytics ? <AnalyticsResult result={item.metadata.analytics} onRetry={onRetry} /> : null}{item.metadata.status === "failed" ? <small className="error">Analysis failed. <button type="button" className="secondary" onClick={onRetry}>Retry</button></small> : null}</article>;
+function MessageBubble({item, onRetry, retryLabel, failedLabel, language: conversationLanguage}: {item: ConversationMessage; onRetry: () => void; retryLabel: string; failedLabel: string; language: "en" | "ar"}) {
+  const language = item.metadata.analytics?.language ?? conversationLanguage;
+  return <article className={`message message-${item.role}`} dir={language === "ar" ? "rtl" : "ltr"} lang={language}><div className="message-content">{item.content}</div>{item.role === "assistant" && item.metadata.analytics ? <AnalyticsResult result={item.metadata.analytics} onRetry={onRetry} /> : null}{item.metadata.status === "failed" ? <small className="error">{failedLabel} <button type="button" className="secondary" onClick={onRetry}>{retryLabel}</button></small> : null}</article>;
 }
 
 function mergeMessages(current: ConversationMessage[], added: ConversationMessage[]) { return [...current, ...added.filter((item) => !current.some((existing) => existing.id === item.id))].sort((left, right) => left.sequence_number - right.sequence_number); }
